@@ -121,6 +121,7 @@ def get_choice(cur_percent, percents, choices):
     return choices[-1]
 
 def init_weight_list(weight_specs, policy, env):
+    
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     print('dev_percents ', dev_percents)
     dev_choices = [env.disk, env.cpu, env.gpu]
@@ -516,13 +517,15 @@ class FLEX_LlamaAttention(LlamaAttention):
         if i == 0:
             # prefill
             # import pdb;pdb.set_trace()---------------------
+            see_memory_usage("-----------------------------------------before mha_llama ")
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             h, new_k_cache, new_v_cache = self.compute.mha_llama(h, mask, w_q, w_k, w_v, w_out,
                                        n_head, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
-            
+            see_memory_usage("-----------------------------------------after mha_llama ")
         else:
             # decoding
+            see_memory_usage("-----------------------------------------before mha_gen_llama ")
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
             h, new_k_cache, new_v_cache = self.compute.mha_gen_llama(
@@ -533,7 +536,7 @@ class FLEX_LlamaAttention(LlamaAttention):
                 input_layernorm,
                 rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
-
+            see_memory_usage("-----------------------------------------after mha_gen_llama ")
         hidden.val = h
         
         return h
@@ -619,7 +622,7 @@ class FLEX_LlamaMLP(LlamaMLP):
         ):
         donate = [False] * 9
         h, donate[0] = hidden_states.val, True
-        print('flex_llama.py MLP forward function  mlp h ,',  h)
+        # print('flex_llama.py MLP forward function  mlp h ,',  h)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((gate, donate[1]), (down, donate[3]),
@@ -630,8 +633,9 @@ class FLEX_LlamaMLP(LlamaMLP):
 
         h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
         hidden_states.val = h
-        print('flex_llama.py MLP forward function  h,',  h)
+        # print('flex_llama.py MLP forward function  h,',  h)
         self.temp_hidden_states.val=h
+        
         return h
 
 

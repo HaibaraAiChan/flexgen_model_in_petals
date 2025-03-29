@@ -19,7 +19,22 @@ from petals.server.task_pool import PrioritizedTaskPool
 from petals.utils.misc import get_size_in_bytes, is_dummy
 
 logger = get_logger(__name__)
+from pynvml import *
 
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
 
 class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Module
     """A wrapper for a transformer block that can process requests for forward, backward and inference"""
@@ -117,7 +132,8 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
     ) -> Tuple[torch.Tensor, ...]:
         assert hidden_states.ndim == 3, "expected hidden states to be 3-dimensional: [batch_size, seq_len, hid_size]" # 确保隐藏状态是三维的 
         seq_len = hidden_states.shape[1] # 获取序列的长度 
-        print("transformer backend inference step : seq_len", seq_len)
+        # print("transformer backend inference step : seq_len", seq_len)
+        see_memory_usage("transformer backend inference step : seq_len")
         with self.memory_cache.use_cache(
             *inference_info.cache_handles  # 使用缓存，降低内存需求  
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter): # 使用adapter进行推理  
@@ -128,6 +144,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
             # is at least 4-6x less than `autograd_memory`.
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info) # 估计最大分块长度 
             print("transformer backend inference step() : max_chunk_length", max_chunk_length)
+            see_memory_usage("transformer backend inference step : seq_len")
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None # 初始化输出状态
             # print("transformer backend inference step : output_hidden_states", output_hidden_states) # output_hidden_states:None
             layer_past = self._select_layer_past(cache_tensors, inference_info.prefix_length) # 选择上一个层的缓存状态 
@@ -138,9 +155,12 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # output_hidden_states_chunk, new_kvs = self.module.forward(
                 #     hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
                 # )
+                see_memory_usage("----before -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
                 output_hidden_states_chunk,= self.module.forward(
                     hidden_states_chunk, layer_past=layer_past, use_cache=False # 前向传播，返回新的键值状态  
                 )
+                see_memory_usage("----after -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
+                
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk # 存储输出
                 else:
@@ -149,7 +169,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
 
             # self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length) # 更新缓存 
             # import pdb;pdb.set_trace()
-            print('backend.py output_hidden_states ', output_hidden_states)
+            print('backend.py output_hidden_states.shape ', output_hidden_states.shape)
             return (output_hidden_states,) # 返回输出的隐藏状态
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
