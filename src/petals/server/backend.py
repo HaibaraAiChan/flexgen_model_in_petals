@@ -100,6 +100,29 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
         for descr in self.get_inference_cache_descriptors(batch_size=1, max_length=1):
             self.cache_bytes_per_token[descr.device] += descr.numel() * get_size_in_bytes(descr.dtype)
 
+        # 创建 CPU 设备列表
+        num_cpus = 1  # 可以根据需要调整
+        cpus = [torch.device('cpu') for _ in range(num_cpus)]
+        
+        # 设置 TensorParallel 模块使用 CPU 设备
+        self.module.devices = cpus
+        
+        # 如果模块有 module_shards，将它们移动到 CPU
+        if hasattr(self.module, 'module_shards'):
+            for shard in self.module.module_shards:
+                shard.to('cpu')
+        
+        # 设置输出设备为 CPU
+        if hasattr(self.module, 'output_device_index'):
+            self.module.output_device_index = 0  # 使用第一个 CPU 作为输出设备
+        
+        # 标记需要延迟初始化
+        self.module.need_delayed_init = True
+        
+        # 记录原始设备，以便在需要时恢复
+        self.original_devices = self.module.devices
+        self.original_output_device_index = self.module.output_device_index
+
     def get_inference_cache_descriptors(self, batch_size: int, max_length: int) -> Sequence[TensorDescriptor]:
         """Create tensor descriptors for attention cache tensors used during inference_step"""
         head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -116,12 +139,32 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
     def forward(self, *inputs: Union[torch.Tensor, str]) -> Tuple[torch.Tensor, ...]:
         *inputs, active_adapter = inputs
         with self._peft_module.using_adapter(active_adapter):
+            # 在 forward 之前，确保模型在正确的设备上
+            self._ensure_model_on_device()
             return super().forward(*inputs)
 
     def backward(self, *inputs: Union[torch.Tensor, str]) -> Tuple[torch.Tensor, ...]:
         *inputs, active_adapter = inputs
         with self._peft_module.using_adapter(active_adapter):
+            # 在 backward 之前，确保模型在正确的设备上
+            self._ensure_model_on_device()
             return super().backward(*inputs)
+
+    def _ensure_model_on_device(self):
+        """确保模型在正确的设备上，如果需要，从 CPU 加载到 GPU"""
+        # 检查当前设备是否与原始设备不同
+        if self.module.devices != self.original_devices:
+            # 将模型移动到原始设备
+            self.module.devices = self.original_devices
+            self.module.output_device_index = self.original_output_device_index
+            
+            # 如果模块有 module_shards，将它们移动到原始设备
+            if hasattr(self.module, 'module_shards'):
+                for shard, device in zip(self.module.module_shards, self.original_devices):
+                    shard.to(device)
+            
+            # 标记需要延迟初始化
+            self.module.need_delayed_init = True
 
     @torch.inference_mode() # 进入推理模式，不计算梯度，从而节省内存 
     def inference_step( # 每一个block都会执行一次, 
@@ -134,6 +177,10 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
         seq_len = hidden_states.shape[1] # 获取序列的长度 
         # print("transformer backend inference step : seq_len", seq_len)
         see_memory_usage("transformer backend inference step : seq_len")
+        
+        # 在推理之前，确保模型在正确的设备上
+        self._ensure_model_on_device()
+        
         with self.memory_cache.use_cache(
             *inference_info.cache_handles  # 使用缓存，降低内存需求  
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter): # 使用adapter进行推理  
@@ -155,6 +202,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # output_hidden_states_chunk, new_kvs = self.module.forward(
                 #     hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
                 # )
+                import pdb;pdb.set_trace()
                 see_memory_usage("----before -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
                 output_hidden_states_chunk,= self.module.forward(
                     hidden_states_chunk, layer_past=layer_past, use_cache=False # 前向传播，返回新的键值状态  
@@ -168,7 +216,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # layer_past = new_kvs # 更新缓存状态
 
             # self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length) # 更新缓存 
-            # import pdb;pdb.set_trace()
+            # import pdb; pdb.set_trace()
             print('backend.py output_hidden_states.shape ', output_hidden_states.shape)
             return (output_hidden_states,) # 返回输出的隐藏状态
 

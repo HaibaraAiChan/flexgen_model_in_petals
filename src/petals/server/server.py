@@ -257,16 +257,16 @@ class Server:
         ##############################################################
         self.env = ExecutionEnv.create("~./flexgen_offload_dir") ##########
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
-                    0, 100,              # w_gpu_percent: float, w_cpu_percent: float
+                    100, 0,              # w_gpu_percent: float, w_cpu_percent: float
                     0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float
-                    100, 0,             # act_gpu_percent: float, act_cpu_percent: float
+                    0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=False,
+                    compress_weight=False,  # 暂时禁用权重压缩，避免 compressed_device 问题
                     comp_weight_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=0, symmetric=False),
-                    compress_cache=False,
+                    compress_cache=False,  # 暂时禁用缓存压缩
                     comp_cache_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=2, symmetric=False))
