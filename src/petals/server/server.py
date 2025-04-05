@@ -262,11 +262,11 @@ class Server:
                     0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=False,
+                    compress_weight=False,  # 暂时禁用权重压缩，避免 compressed_device 问题
                     comp_weight_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=0, symmetric=False),
-                    compress_cache=False,
+                    compress_cache=False,  # 暂时禁用缓存压缩
                     comp_cache_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=2, symmetric=False))
