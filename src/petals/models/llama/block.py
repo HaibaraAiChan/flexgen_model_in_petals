@@ -744,6 +744,10 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # print('pos_id i', pos_id)
         # import pdb;pdb.set_trace()
         # print('layer j ', j)
+        
+        # Profile memory before forward pass
+        see_memory_usage(f"-----------------------------------------before compute_layer {j} forward pass for token {i}")
+        
         self.layers[j].forward(hidden_states=self.hidden[i][j][k], 
                                cache_read_buf=self.cache_read_buf[j][k],
                                weight_read_buf=self.weight_read_buf[j], 
@@ -751,9 +755,13 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                                k=k, 
                                attention_mask=self.attention_mask[k], 
                                position_ids=pos_id)
+                               
+        # Profile memory after forward pass
+        see_memory_usage(f"-----------------------------------------after compute_layer {j} forward pass for token {i}")
+        
         self.temp_hidden.val = self.layers[j].temp_hidden_states.val
         # print('self.temp_hidden.val.data ', self.temp_hidden.val.data)
-        return self.layers[j].temp_hidden_states.val 
+        return self.layers[j].temp_hidden_states.val
     
 #######################################################################################
 

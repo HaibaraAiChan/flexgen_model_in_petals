@@ -123,7 +123,7 @@ def get_choice(cur_percent, percents, choices):
 def init_weight_list(weight_specs, policy, env):
     
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-    print('dev_percents ', dev_percents)
+    print('dev_percents :[ disk, cpu, gpu]', dev_percents)
     dev_choices = [env.disk, env.cpu, env.gpu]
 
     sizes = [np.prod(spec[0]) for spec in weight_specs]
@@ -569,7 +569,7 @@ class FLEX_LlamaMLP(LlamaMLP):
         # print('self.llama_config ', self.llama_config)
         # intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
         intermediate_size, h, dtype = (self.config.intermediate_size, self.config.hidden_size, np.float16)
-        
+        print('intermediate_size, h, dtype ', intermediate_size, h, dtype)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
         weight_specs = [
             # 4 weight files
