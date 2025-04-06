@@ -22,6 +22,8 @@ class ExecutionEnv:
 
     @classmethod
     def create(cls, offload_dir):
+        from petals.flexgen_utils.pytorch_backend import fix_recursive_import
+        fix_recursive_import()  # Initialize TorchCompressedDevice
         gpu = TorchDevice("cuda:0")
         print('ExecutionEnv: gpu ', gpu)
         cpu = TorchDevice("cpu")

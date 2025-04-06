@@ -207,10 +207,9 @@ class Server:
         if len(self.tensor_parallel_devices) > 1:
             logger.info(f"Model weights will be split between {', '.join(tensor_parallel_devices)}")
             check_device_balance(self.tensor_parallel_devices)
-
+        import pdb;pdb.set_trace()
         if quant_type is None:
             quant_type = QuantType.NF4 if device.type == "cuda" else QuantType.NONE
-        quant_type = QuantType.NONE ########## manually change the QuantType
         self.quant_type = quant_type
         logger.info(f"Model weights are loaded in {get_dtype_name(torch_dtype, quant_type)} format")
 
@@ -256,13 +255,14 @@ class Server:
 
         ##############################################################
         self.env = ExecutionEnv.create("~./flexgen_offload_dir") ##########
+        fix_recursive_import()  # Initialize TorchCompressedDevice
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
                     100, 0,              # w_gpu_percent: float, w_cpu_percent: float
                     0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float
                     0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=False,  # 暂时禁用权重压缩，避免 compressed_device 问题
+                    compress_weight=True,  # 暂时禁用权重压缩，避免 compressed_device 问题
                     comp_weight_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=0, symmetric=False),

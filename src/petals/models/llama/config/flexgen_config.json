@@ -16,17 +16,19 @@
         "pin_weight": true,  
         "cpu_cache_compute": false,  
         "attn_sparsity":1.0,  
-        "compress_weight": false,  
+        "compress_weight": true,  
         "comp_weight_config": {  
-        "num_bits":4,  
-        "group_size":64,  
-        "group_dim":0,  
-        "symmetric": false },  
+            "num_bits":4,  
+            "group_size":64,  
+            "group_dim":0,  
+            "symmetric": false 
+        },  
         "compress_cache": false,  
         "comp_cache_config": {  
-        "num_bits":4,  
-        "group_size":64,  
-        "group_dim":2,  
-        "symmetric": false }  
+            "num_bits":4,  
+            "group_size":64,  
+            "group_dim":2,  
+            "symmetric": false 
         }  
-   }
+    }  
+}
