@@ -202,7 +202,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # output_hidden_states_chunk, new_kvs = self.module.forward(
                 #     hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
                 # )
-                import pdb;pdb.set_trace()
+                # import pdb;pdb.set_trace()
                 see_memory_usage("----before -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
                 output_hidden_states_chunk,= self.module.forward(
                     hidden_states_chunk, layer_past=layer_past, use_cache=False # 前向传播，返回新的键值状态  

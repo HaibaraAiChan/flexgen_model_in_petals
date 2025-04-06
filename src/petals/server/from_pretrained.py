@@ -91,13 +91,13 @@ def load_pretrained_block(
             param = param.to(torch_dtype)
         set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
     
-    # 使用 FlexGen 的权重加载方式
-    try:
-        load_weights_from_pytorch_model(block, policy, env, weight_home, block_index)
-        logger.info(f"Loaded {model_name} block {block_index} with FlexGen weight management")
-    except Exception as e:
-        logger.warning(f"Failed to load weights with FlexGen: {e}")
-        logger.info(f"Loaded {model_name} block {block_index} with direct parameter assignment")
+    # # 使用 FlexGen 的权重加载方式
+    # try:
+    #     load_weights_from_pytorch_model(block, policy, env, weight_home, block_index)
+    #     logger.info(f"Loaded {model_name} block {block_index} with FlexGen weight management")
+    # except Exception as e:
+    #     logger.warning(f"Failed to load weights with FlexGen: {e}")
+    #     logger.info(f"Loaded {model_name} block {block_index} with direct parameter assignment")
     
     return block
 
