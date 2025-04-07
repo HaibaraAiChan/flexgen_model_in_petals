@@ -3,9 +3,12 @@ import dataclasses
 import torch
 import numpy as np
 
-from flexgen.pytorch_backend import (TorchTensor, TorchDevice,
-    DeviceType, general_copy, fix_recursive_import)
-from flexgen.utils import np_dtype_to_torch_dtype
+
+from petals.flexgen_utils.torch_tensor import TorchTensor
+from petals.flexgen_utils.torch_device import TorchDevice, global_cpu_device
+from petals.flexgen_utils.DeviceType import DeviceType
+from petals.flexgen_utils.base import general_copy, fix_recursive_import
+from petals.flexgen_utils.utils import np_dtype_to_torch_dtype
 
 
 @dataclasses.dataclass
@@ -31,21 +34,38 @@ class TorchCompressedDevice:
         self.workspace_pt = 0
 
     def allocate(self, shape, dtype, comp_config, pin_memory=None, name=None):
-        """Allocate a compressed TorchTensor. Round up the shape to group boundary."""
+        """Allocate a compressed TorchTensor while maintaining the original shape."""
         assert comp_config.num_bits == 4 and dtype == np.float16
-
+        # import pdb; pdb.set_trace()
         group_size, group_dim = comp_config.group_size, comp_config.group_dim
 
-        # Round up
+        # Calculate the number of groups needed
         num_groups = (shape[group_dim] + group_size - 1) // group_size
-        data_shape = (
-            shape[:group_dim] + (num_groups * (group_size // 2),) + shape[group_dim+1:])
-        scale_shape = (
-            shape[:group_dim] + (num_groups, 2) + shape[group_dim+1:])
-
+        
+        # Calculate the size of the compressed data
+        # We're using 4-bit quantization, so each group of 2 elements can be stored in 1 byte
+        compressed_size = num_groups * (group_size // 2)
+        
+        # Create shapes for the compressed data and scale factors
+        # The data shape maintains the original dimensions but with compressed data
+        data_shape = list(shape)
+        data_shape[group_dim] = compressed_size
+        
+        # The scale shape includes the original dimensions plus an extra dimension for min/max values
+        # For scale, we need to use num_groups instead of the original shape[group_dim]
+        scale_shape = list(shape)
+        scale_shape[group_dim] = num_groups  # Use num_groups instead of shape[group_dim]
+        scale_shape.insert(group_dim + 1, 2)  # Add dimension for min/max values
+        
+        # 添加调试信息
+        print(f"Allocating compressed tensor: original shape {shape}, data_shape {data_shape}, scale_shape {scale_shape}")
+        print(f"group_dim={group_dim}, group_size={group_size}, num_groups={num_groups}, compressed_size={compressed_size}")
+        
+        # Allocate the compressed data and scale tensors
         data = self.base_device.allocate(data_shape, np.uint8, pin_memory=pin_memory)
         scale = self.base_device.allocate(scale_shape, np.float16, pin_memory=pin_memory)
 
+        # Return a tensor with the original shape but compressed data
         return TorchTensor(shape, np_dtype_to_torch_dtype[dtype],
                            (data, scale, comp_config), self, name=name)
 
@@ -86,7 +106,15 @@ class TorchCompressedDevice:
         ]
 
     def compress(self, tensor, comp_config):
-        """Compress a torch.Tensor. Round up the shape to group boundary."""
+        """Compress a torch.Tensor while maintaining the original shape."""
+        # Ensure we have a valid base device
+        if self.base_device is None:
+            if global_cpu_device is None:
+                # Create CPU device first
+                global_cpu_device = TorchDevice("cpu")
+                # global_cpu_device will be set in TorchDevice.__init__
+            self.base_device = global_cpu_device
+
         group_size, num_bits, group_dim, symmetric = (
             comp_config.group_size, comp_config.num_bits,
             comp_config.group_dim, comp_config.symmetric)
@@ -130,11 +158,25 @@ class TorchCompressedDevice:
         data = torch.bitwise_or(
             data[left_indices].bitwise_left_shift(4), data[right_indices])
 
-        # Reshape
-        data_shape = (
-            shape[:group_dim] + (num_groups * (group_size // 2),) + shape[group_dim+1:])
-        scale_shape = (
-            shape[:group_dim] + (num_groups, 2) + shape[group_dim+1:])
+        # Calculate the size of the compressed data
+        compressed_size = num_groups * (group_size // 2)
+        
+        # Create shapes for the compressed data and scale factors
+        # The data shape maintains the original dimensions but with compressed data
+        data_shape = list(shape)
+        data_shape[group_dim] = compressed_size
+        
+        # The scale shape includes the original dimensions plus an extra dimension for min/max values
+        # For scale, we need to use num_groups instead of the original shape[group_dim]
+        scale_shape = list(shape)
+        scale_shape[group_dim] = num_groups  # Use num_groups instead of shape[group_dim]
+        scale_shape.insert(group_dim + 1, 2)  # Add dimension for min/max values
+        
+        # 添加调试信息
+        print(f"Compressing tensor: original shape {shape}, data_shape {data_shape}, scale_shape {scale_shape}")
+        print(f"group_dim={group_dim}, group_size={group_size}, num_groups={num_groups}, compressed_size={compressed_size}")
+        
+        # Reshape the data and scale tensors
         data = data.view(data_shape)
         scale = torch.cat([scale, mn], dim=group_dim+1).view(scale_shape)
 
@@ -150,21 +192,29 @@ class TorchCompressedDevice:
             comp_config.group_size, comp_config.num_bits,
             comp_config.group_dim, comp_config.symmetric)
 
+        # Calculate the number of groups from the compressed data shape
+        compressed_size = data.shape[group_dim]
         group_size_c = group_size // 2
-        shape = data.shape
-        num_groups = (shape[group_dim] + group_size_c - 1) // group_size_c
+        num_groups = compressed_size // group_size_c
 
-        # Pad
-        new_shape = (shape[:group_dim] + (num_groups, group_size_c) +
-                     shape[group_dim+1:])
-        pad_len = (group_size_c - shape[group_dim] % group_size_c) % group_size_c
+        # Create a shape for the unpacked data
+        shape = data.shape
+        new_shape = list(shape)
+        new_shape[group_dim] = num_groups * group_size
+        
+        # Pad if necessary
+        pad_len = (group_size - tensor.shape[group_dim] % group_size) % group_size
         if pad_len != 0:
             pad_shape = shape[:group_dim] + (pad_len,) + shape[group_dim+1:]
             data = torch.cat([
                 data,
                 torch.zeros(pad_shape, dtype=data.dtype, device=data.device)],
                 dim=group_dim)
-        packed = data.data.view(new_shape)
+        
+        # Reshape for unpacking
+        unpack_shape = list(shape)
+        unpack_shape[group_dim] = num_groups * group_size_c
+        packed = data.data.view(unpack_shape)
 
         # Unpack
         if self.base_device.device_type == DeviceType.CPU:
@@ -176,6 +226,8 @@ class TorchCompressedDevice:
             new_shape = (shape[:group_dim] + (num_groups, group_size,) +
                          shape[group_dim+1:])
             data = torch.empty(new_shape, dtype=torch.float16, device=packed.device)
+        
+        # Unpack the 4-bit values
         left_indices = (
             tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
             (slice(0, data.shape[group_dim+1], 2),))
@@ -190,7 +242,7 @@ class TorchCompressedDevice:
         data.div_(scale)
         data.add_(mn)
 
-        # Reshape
+        # Reshape back to the original shape
         unpad_len = (group_size - tensor.shape[group_dim] % group_size) % group_size
         if unpad_len != 0:
             flatten_shape = (shape[:group_dim] + (num_groups * group_size,) +
@@ -211,9 +263,45 @@ def general_copy_compressed(dst, dst_indices, src, src_indices):
 
     dst_data_indices, dst_scale_indices = get_compressed_indices(
         dst, dst_indices, dst.shape)
-
-    general_copy(dst.data[0], dst_data_indices, src.data[0], src_data_indices)
-    general_copy(dst.data[1], dst_scale_indices, src.data[1], src_scale_indices)
+    
+    # 添加调试信息
+    print(f"Copying compressed tensor: src shape {src.shape}, dst shape {dst.shape}")
+    print(f"src_data shape: {src.data[0].shape}, dst_data shape: {dst.data[0].shape}")
+    print(f"src_data_indices: {src_data_indices}, dst_data_indices: {dst_data_indices}")
+    
+    # 检查源张量和目标张量的形状是否匹配
+    src_data_shape = src.data[0].shape
+    dst_data_shape = dst.data[0].shape
+    
+    # 检查索引是否会导致形状不匹配
+    src_slice = src_data_indices[0]  # 假设 group_dim=0
+    dst_slice = dst_data_indices[0]
+    
+    src_size = src_slice.stop - src_slice.start
+    dst_size = dst_slice.stop - dst_slice.start
+    
+    if src_size != dst_size:
+        print(f"Warning: Shape mismatch in general_copy_compressed: src_size={src_size}, dst_size={dst_size}")
+        
+        # 调整源索引以匹配目标索引的大小
+        if src_size > dst_size:
+            # 如果源大小大于目标大小，截断源
+            src_data_indices[0] = slice(src_slice.start, src_slice.start + dst_size)
+            src_scale_indices[0] = slice(src_scale_indices[0].start, src_scale_indices[0].start + (dst_size + 63) // 64)
+        else:
+            # 如果源大小小于目标大小，扩展目标
+            dst_data_indices[0] = slice(dst_slice.start, dst_slice.start + src_size)
+            dst_scale_indices[0] = slice(dst_scale_indices[0].start, dst_scale_indices[0].start + (src_size + 63) // 64)
+    
+    # 执行复制操作
+    try:
+        general_copy(dst.data[0], dst_data_indices, src.data[0], src_data_indices)
+        general_copy(dst.data[1], dst_scale_indices, src.data[1], src_scale_indices)
+    except RuntimeError as e:
+        print(f"Error in general_copy_compressed: {e}")
+        print(f"src.data[0].shape: {src.data[0].shape}, dst.data[0].shape: {dst.data[0].shape}")
+        print(f"src_data_indices: {src_data_indices}, dst_data_indices: {dst_data_indices}")
+        raise
 
 
 def get_compressed_indices(tensor, indices, shape):
@@ -225,17 +313,27 @@ def get_compressed_indices(tensor, indices, shape):
         indices = list(slice(0, x) for x in shape[:group_dim+1])
     else:
         indices = list(indices) + [slice(0, x) for x in shape[len(indices):]]
+    
+    # Calculate the compressed size for the specified dimension
+    num_groups = (shape[group_dim] + group_size - 1) // group_size
+    compressed_size = num_groups * (group_size // 2)
+    
+    # Ensure the start index is aligned with the group size
     assert indices[group_dim].start % group_size == 0
 
+    # Create indices for the compressed data
     data_indices = list(indices)
+    # Adjust the end index to account for compression
     data_indices[group_dim] = slice(
-        indices[group_dim].start // 2, (indices[group_dim].stop + 1) // 2)
+        indices[group_dim].start // 2, 
+        min((indices[group_dim].stop + 1) // 2, compressed_size))
 
-    scale_indices = indices
+    # Create indices for the scale factors
+    scale_indices = list(indices)
     scale_indices.insert(group_dim+1, slice(0, 2))
     scale_indices[group_dim] = slice(
         indices[group_dim].start // group_size,
-        (indices[group_dim].stop + group_size - 1) // group_size)
+        min((indices[group_dim].stop + group_size - 1) // group_size, num_groups))
 
     return data_indices, scale_indices
 

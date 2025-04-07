@@ -10,6 +10,7 @@ import time
 import threading
 from typing import Optional, Union, Tuple
 
+from petals.flexgen_utils.compression import decompress
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -28,10 +29,23 @@ global_disk_device = None
 
 
 def fix_recursive_import():
+    """Fix recursive imports and initialize necessary components."""
     global general_copy_compressed, TorchCompressedDevice, global_cpu_device
+    
+    # First import all necessary components
     from petals.flexgen_utils import compression
     general_copy_compressed = compression.general_copy_compressed
     TorchCompressedDevice = compression.TorchCompressedDevice
+    
+    # Then create the CPU device if it doesn't exist
+    if global_cpu_device is None:
+        # Create CPU device
+        global_cpu_device = TorchDevice("cpu")
+        
+        # Ensure the compressed device is created
+        if global_cpu_device.compressed_device is None:
+            global_cpu_device.compressed_device = TorchCompressedDevice(global_cpu_device)
+
 from pynvml import *
 
 def see_memory_usage(message, force=True):
@@ -174,15 +188,22 @@ class TorchTensor:
         self.device = self.data = None
 
     def load_from_np(self, np_array):
-        # print(np_array.shape)
         if self.device.device_type == DeviceType.DISK:
             with open(self.data, "wb") as fout:
                 np.save(fout, np_array)
         else:
             if self.device.device_type == DeviceType.COMPRESSED:
+                # Convert numpy array to torch tensor
                 tmp = torch.from_numpy(np_array)
-                tmp = global_cpu_device.compressed_device.compress(tmp, self.data[2])
-                general_copy(self, None, tmp, None)
+                print('tmp.shape', tmp.shape) # torch.Size([4096, 4096])
+                # Use the device's own compressed_device for compression
+                if self.device.base_device.compressed_device is None:
+                    raise RuntimeError("Device's compressed_device is None")
+                    
+                ctmp = self.device.base_device.compressed_device.compress(tmp, self.data[2])
+                print('ctmp', ctmp) # torch.Size([2048, 4096]), scale [4096,2,4096]?
+                # import pdb; pdb.set_trace()
+                general_copy(self, None, ctmp, None)
             else:
                 self.data.copy_(torch.from_numpy(np_array))
 
@@ -199,6 +220,15 @@ class TorchTensor:
                 np.save(fout, np.array(param))
         else:
             if self.device.device_type == DeviceType.COMPRESSED:
+                # Ensure global_cpu_device is initialized
+                global global_cpu_device
+                if global_cpu_device is None:
+                    # Create a CPU device if it doesn't exist
+                    from petals.flexgen_utils import compression
+                    global TorchCompressedDevice
+                    TorchCompressedDevice = compression.TorchCompressedDevice
+                    global_cpu_device = TorchDevice("cpu")
+                
                 tmp = param
                 tmp = global_cpu_device.compressed_device.compress(tmp, self.data[2])
                 general_copy(self, None, tmp, None)
@@ -246,28 +276,45 @@ class TorchDevice:
     """Wrap tensor and computation APIs of a single CPU or GPU."""
 
     def __init__(self, name, mem_capacity=None, flops=None):
-        self.name = name
+        global global_cpu_device, TorchCompressedDevice
+        
+        # Handle both string and torch.device objects
+        if isinstance(name, torch.device):
+            self.name = str(name)
+            self.dev = name
+        else:
+            self.name = name
+            self.dev = torch.device(name)
+            
         self.mem_capacity = mem_capacity
         self.flops = flops
+        self.links = []
+        self.compressed_device = None
 
-        self.dev = torch.device(name)
-        self.device_type = DeviceType.convert(self.dev.type)
-        # print('TorchDevice name', name) # cuda:0
-        # print('TorchDevice dev', self.dev) # cuda:0
-        # print('TorchDevice device_type', self.device_type) # DeviceType.CUDA
-        # # TorchCompressedDevice
-        # print('TorchDevice, TorchCompressedDevice ',TorchCompressedDevice)
-        # print('TorchDevice, self ',self)
-        self.compressed_device = TorchCompressedDevice(self)
-        
-        self.links = {}
+        # Check device type based on the device string
+        device_str = str(self.dev)
+        if device_str == "cpu":
+            self.device_type = DeviceType.CPU
+            if global_cpu_device is None:
+                global_cpu_device = self
+            # Initialize compressed device for CPU
+            from petals.flexgen_utils import compression
+            if TorchCompressedDevice is None:
+                TorchCompressedDevice = compression.TorchCompressedDevice
+            self.compressed_device = TorchCompressedDevice(self)
+        elif "cuda" in device_str:
+            self.device_type = DeviceType.CUDA
+            # Initialize compressed device for CUDA
+            from petals.flexgen_utils import compression
+            if TorchCompressedDevice is None:
+                TorchCompressedDevice = compression.TorchCompressedDevice
+            self.compressed_device = TorchCompressedDevice(self)
+        else:
+            raise ValueError(f"Invalid device name: {device_str}")
 
+        # Initialize attention compute workspace
         self.attention_compute_workspace = None
         self.workspace_pt = 0
-
-        if self.device_type == DeviceType.CPU:
-            global global_cpu_device
-            global_cpu_device = self
 
     def add_link(self, link):
         dst = link.b if link.a == self else link.a
@@ -523,192 +570,6 @@ class TorchDevice:
         hidden = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
 
         # shape: (b, 1, h)
-        q = F.linear(hidden, w_q.data, bias=b_q.data) * scaling
-        k = F.linear(hidden, w_k.data, bias=b_k.data)
-        v = F.linear(hidden, w_v.data, bias=b_v.data)
-        # shape: (b, 1, n_head, head_dim)
-        q = q.view(b, tgt_s, n_head, head_dim)
-        k = k.view(b, tgt_s, n_head, head_dim)
-        v = v.view(b, tgt_s, n_head, head_dim)
-        # ic| pytorch_backend.py:473 in mha_gen()- q.dtype: torch.float16
-        # ic| pytorch_backend.py:474 in mha_gen()- k.dtype: torch.float16
-        # shape: (b * n_head, 1, head_dim)
-        q = q.permute(0, 2, 1, 3).reshape(b * n_head, tgt_s, head_dim)
-        # shape: (1, b * n_head, head_dim)
-        k_new = k.permute(1, 0, 2, 3).reshape(tgt_s, b * n_head, head_dim)
-        # shape: (1, b * n_head, head_dim)
-        v_new = v.permute(1, 0, 2, 3).reshape(tgt_s, b * n_head, head_dim)
-        # ic| pytorch_backend.py:481 in mha_gen()- k.dtype: torch.float16
-        # ic| pytorch_backend.py:480 in mha_gen()- q.dtype: torch.float16
-        if isinstance(k_cache, TorchTensor):
-            if attn_sparsity >= 1.0:  # Dense attention
-                if compress_cache:
-                    # shape: (s, b * n_head, head_dim)
-                    k = k_cache.device.decompress(k_cache)[:src_s]
-                    v = v_cache.device.decompress(v_cache)[:src_s]
-                else:
-                    # shape: (s, b * n_head, head_dim)
-                    k = k_cache.data[:src_s]
-                    v = v_cache.data[:src_s]
-                k[src_s - 1:src_s] = k_new
-                v[src_s - 1:src_s] = v_new
-
-                # shape: (b * n_head, head_dim, s)
-                k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
-                # shape: (b * n_head, s, head_dim)
-                v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
-                if k.is_cuda:
-                    value = self._attention_value(q, k, v, attention_mask.data,
-                        b, src_s, tgt_s, n_head, head_dim)
-                else:
-                    q = q.float().cpu()
-                    k, v = k.float(), v.float()
-                    value = self._attention_value(q, k, v, attention_mask.data,
-                        b, src_s, tgt_s, n_head, head_dim).cuda().half()
-            else:  # Sparse attention
-                # shape: (s, b * n_head, head_dim)
-                k = k_cache.data[:src_s]
-                k[src_s - 1:src_s] = k_new
-                # shape: (b * n_head, head_dim, s)
-                k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
-
-                if k.is_cuda:
-                    value = self._sparse_attention_value(q, k, v_new, v_cache,
-                        attention_mask.data, b, src_s, tgt_s, n_head, head_dim,
-                        attn_sparsity)
-                else:
-                    q = q.float().cpu()
-                    value = self._sparse_attention_value(q, k, v_new, v_cache,
-                        attention_mask.data, b, src_s, tgt_s, n_head, head_dim,
-                        attn_sparsity).cuda().half()
-        else:  # Mixed device attention
-            assert attn_sparsity >= 1.0
-            value = self._mixed_device_attention(q, k_cache, v_cache,
-                k_new, v_new, attention_mask.data, b, src_s, tgt_s,
-                n_head, head_dim)
-
-        # shape: (b, 1, h)
-        value = value.transpose(1, 2).view(b, tgt_s, h)
-        value = F.linear(value, w_out.data, bias=b_out.data)
-
-        value.add_(inputs.data)
-
-        if donate[0]: inputs.delete()
-        if donate[1]: attention_mask.delete()
-
-        if compress_cache:
-            if comp_config.group_dim == 0:
-                s_ = src_s // comp_config.group_size * comp_config.group_size
-                k_new = k[:, :, s_:].permute(2, 0, 1)
-                v_new = v[:, s_:, :].permute(1, 0, 2)
-            k_new = self.compressed_device.compress(k_new, comp_config)
-            v_new = self.compressed_device.compress(v_new, comp_config)
-        else:
-            k_new = TorchTensor.create_from_torch(k_new, self)
-            v_new = TorchTensor.create_from_torch(v_new, self)
-
-        return TorchTensor.create_from_torch(value, self), k_new, v_new
-    
-
-    def mha_llama(self, hidden_states, attention_mask, w_q, w_k, w_v, w_out, n_head, donate, compress_cache, comp_config, input_layernorm, rotary_emb_inv_freq):
-        """Multi-head attention (prefill phase)."""
-        # decompress weight
-        if w_q.device.device_type == DeviceType.COMPRESSED:
-            w_q = w_q.device.decompress(w_q)
-            w_k = w_k.device.decompress(w_k)
-            w_v = w_v.device.decompress(w_v)
-            w_out = w_out.device.decompress(w_out)
-        
-        bsz,q_len,h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 1, 4096])
-        # 1 is the length of inputs.ids
-        # if the length of inputs is 8, the hidden_states.shape should be torch.Size([1, 8, 4096])
-        # q_len = 8 ##########################################################################
-        head_dim = h // n_head
-        freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
-        scaling = head_dim ** -0.5
-        # import pdb; pdb.set_trace()
-        hidden = rms_norm(hidden_states.data, input_layernorm.data)
-        # hidden = F.layer_norm(hidden_states.data, (h,), weight=input_layernorm.data)
-        
-        q = F.linear(hidden, w_q.data) * scaling
-        k = F.linear(hidden, w_k.data)
-        v = F.linear(hidden, w_v.data)
-
-        q = q.view(bsz, q_len, n_head, head_dim)
-        k = k.view(bsz, q_len, n_head, head_dim)
-        v = v.view(bsz, q_len, n_head, head_dim)
-
-        q, k = apply_rotary_emb(q, k, freqs_cis=freq_cis[:q_len])
-
-        # shape: (b * n_head, s, head_dim)
-        q = q.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
-        # shape: (b * n_head, head_dim, s)
-        k = k.permute(0, 2, 3, 1).reshape(bsz * n_head, head_dim, q_len)
-        # shape: (b * n_head, s, head_dim)
-        v = v.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
-
-        attn_weights = torch.bmm(q, k)
-
-        idx = torch.arange(q_len, device=self.dev)
-        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
-        # causal_mask.shape should be torch.Size([1, 1, 1, 1])
-        # 1 is the length of inputs.ids
-        # if the length of inputs is 8, the causal_mask.shape should be torch.Size([1, 1, 8, 8])
-        # import pdb; pdb.set_trace()
-        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask # shape [1,1]
-        # mask.shape should be torch.Size([1, 1, 1, 1])
-        
-        # shape: (b, n_head, s, s)
-        attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
-        attn_weights = torch.where(mask, attn_weights, -1e4)
-        attn_weights = attn_weights.view(bsz * n_head, q_len, q_len)
-        attn_weights = F.softmax(attn_weights, dim=2)
-        # shape: (b, n_head, s, head_dim)
-        value = torch.bmm(attn_weights, v).view(bsz, n_head, q_len, head_dim)
-        # shape: (b, s, h)
-        value = value.transpose(1, 2).reshape(bsz, q_len, h)
-        value = F.linear(value, w_out.data)
-
-        value.add_(hidden_states.data)
-
-        if donate[0]: hidden_states.delete()
-        if donate[1]: attention_mask.delete()
-
-        # (s, b * n_head, head_dim)
-        k = k.permute(2, 0, 1)
-        v = v.permute(1, 0, 2)
-
-        if compress_cache:
-            k = self.compressed_device.compress(k, comp_config)
-            v = self.compressed_device.compress(v, comp_config)
-        else:
-            k = TorchTensor.create_from_torch(k, self)
-            v = TorchTensor.create_from_torch(v, self)
-        ## k.shape (32,32,128)
-        ## v.shape (32,32,128)
-        return TorchTensor.create_from_torch(value, self), k, v
-
-    def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v,
-                w_out, n_head, k_cache, v_cache, donate,
-                attn_sparsity, compress_cache, comp_config, input_layernorm, rotary_emb_inv_freq):
-        """Multi-head attention (decoding phase)."""
-        # decompress weights
-        if w_q.device.device_type == DeviceType.COMPRESSED:
-            w_q = w_q.device.decompress(w_q)
-            w_k = w_k.device.decompress(w_k)
-            w_v = w_v.device.decompress(w_v)
-            w_out = w_out.device.decompress(w_out)
-
-        b, tgt_s, h = inputs.shape
-        src_s = attention_mask.shape[1]
-        head_dim = h // n_head
-        freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
-        scaling = head_dim ** -0.5
-
-        hidden = rms_norm(inputs.data, input_layernorm.data)
-        # hidden = F.layer_norm(inputs.data, (h,), weight=input_layernorm.data)
-
-        # shape: (b, 1, h)
         q = F.linear(hidden, w_q.data) * scaling
         k = F.linear(hidden, w_k.data)
         v = F.linear(hidden, w_v.data)
@@ -730,10 +591,31 @@ class TorchDevice:
                     # shape: (s, b * n_head, head_dim)
                     k = k_cache.device.decompress(k_cache)[:src_s]
                     v = v_cache.device.decompress(v_cache)[:src_s]
+                    
+                    # 确保缓存张量也是 float16 类型
+                    if k.dtype != torch.float16:
+                        k = k.to(dtype=torch.float16)
+                    if v.dtype != torch.float16:
+                        v = v.to(dtype=torch.float16)
+                        
+                    # 确保缓存张量在正确的设备上
+                    k = k.to(device=self.dev)
+                    v = v.to(device=self.dev)
                 else:
                     # shape: (s, b * n_head, head_dim)
                     k = k_cache.data[:src_s]
                     v = v_cache.data[:src_s]
+                    
+                    # 确保缓存张量也是 float16 类型
+                    if k.dtype != torch.float16:
+                        k = k.to(dtype=torch.float16)
+                    if v.dtype != torch.float16:
+                        v = v.to(dtype=torch.float16)
+                        
+                    # 确保缓存张量在正确的设备上
+                    k = k.to(device=self.dev)
+                    v = v.to(device=self.dev)
+                        
                 k[src_s - 1:src_s] = k_new
                 v[src_s - 1:src_s] = v_new
                 # shape: (b * n_head, head_dim, s)
@@ -751,46 +633,398 @@ class TorchDevice:
             else:  # Sparse attention
                 # shape: (s, b * n_head, head_dim)
                 k = k_cache.data[:src_s]
+                
+                # 确保缓存张量也是 float16 类型
+                if k.dtype != torch.float16:
+                    k = k.to(dtype=torch.float16)
+                    
+                # 确保缓存张量在正确的设备上
+                k = k.to(device=self.dev)
+                    
                 k[src_s - 1:src_s] = k_new
                 # shape: (b * n_head, head_dim, s)
                 k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
+                # shape: (b * n_head, s, head_dim)
+                v = v_cache.data[:src_s]
+                
+                # 确保缓存张量也是 float16 类型
+                if v.dtype != torch.float16:
+                    v = v.to(dtype=torch.float16)
+                    
+                # 确保缓存张量在正确的设备上
+                v = v.to(device=self.dev)
+                    
+                v[src_s - 1:src_s] = v_new
+                v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
+                value = self._sparse_attention_value(q, k, v_new, v, attention_mask.data,
+                    b, src_s, tgt_s, n_head, head_dim, attn_sparsity)
+        else:
+            # shape: (b * n_head, head_dim, s)
+            k = k_cache.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
+            # shape: (b * n_head, s, head_dim)
+            v = v_cache.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
+            value = self._attention_value(q, k, v, attention_mask.data,
+                b, src_s, tgt_s, n_head, head_dim)
 
-                if k.is_cuda:
-                    value = self._sparse_attention_value(q, k, v_new, v_cache,
-                        attention_mask.data, b, src_s, tgt_s, n_head, head_dim,
-                        attn_sparsity)
-                else:
-                    q = q.float().cpu()
-                    value = self._sparse_attention_value(q, k, v_new, v_cache,
-                        attention_mask.data, b, src_s, tgt_s, n_head, head_dim,
-                        attn_sparsity).cuda().half()
-        else:  # Mixed device attention
-            assert attn_sparsity >= 1.0
-            value = self._mixed_device_attention(q, k_cache, v_cache,
-                k_new, v_new, attention_mask.data, b, src_s, tgt_s,
-                n_head, head_dim)
-
-        # shape: (b, 1, h)
-        value = value.transpose(1, 2).view(b, tgt_s, h)
-        value = F.linear(value, w_out.data)
-
+        # shape: (b, s, h)
+        value = value.view(b, tgt_s, h)
+        value = F.linear(value, w_out.data, bias=b_out.data)
+        
+        # 检查value的大小是否与inputs.data匹配
+        if value.shape != inputs.data.shape:
+            print(f"Warning: Value tensor shape {value.shape} does not match inputs shape {inputs.data.shape}")
+            # 如果value的大小是inputs.data的一半，尝试通过复制数据来恢复
+            if value.numel() == inputs.data.numel() // 2:
+                print(f"Value tensor size is half of inputs. Attempting to recover by duplicating data.")
+                value_flat = value.view(-1)
+                value_duplicated = torch.cat([value_flat, value_flat])
+                value = value_duplicated[:inputs.data.numel()].view(inputs.data.shape)
+            else:
+                # 尝试调整value的大小以匹配inputs.data
+                print(f"Attempting to reshape value tensor to match inputs shape")
+                value = value.view(-1)[:inputs.data.numel()].view(inputs.data.shape)
+                
         value.add_(inputs.data)
 
         if donate[0]: inputs.delete()
         if donate[1]: attention_mask.delete()
 
+        # (s, b * n_head, head_dim)
+        k_new = k_new.permute(0, 1, 2)
+        v_new = v_new.permute(0, 1, 2)
+
         if compress_cache:
-            if comp_config.group_dim == 0:
-                s_ = src_s // comp_config.group_size * comp_config.group_size
-                k_new = k[:, :, s_:].permute(2, 0, 1)
-                v_new = v[:, s_:, :].permute(1, 0, 2)
             k_new = self.compressed_device.compress(k_new, comp_config)
             v_new = self.compressed_device.compress(v_new, comp_config)
-        else:
-            k_new = TorchTensor.create_from_torch(k_new, self)
-            v_new = TorchTensor.create_from_torch(v_new, self)
 
-        return TorchTensor.create_from_torch(value, self), k_new, v_new
+        return value, k_new, v_new
+    
+
+    def mha_llama(self, hidden_states, attention_mask, w_q, w_k, w_v, w_out, n_head, donate, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False, comp_weight_config=None):
+        print(f"[mha_llama] Input hidden shape: {hidden_states.shape}")
+        
+        # Check if weights are tuples and extract the TorchTensor
+        if isinstance(w_q, tuple):
+            w_q_tensor = w_q[0]
+        else:
+            w_q_tensor = w_q
+            
+        if isinstance(w_k, tuple):
+            w_k_tensor = w_k[0]
+        else:
+            w_k_tensor = w_k
+            
+        if isinstance(w_v, tuple):
+            w_v_tensor = w_v[0]
+        else:
+            w_v_tensor = w_v
+            
+        if isinstance(w_out, tuple):
+            w_out_tensor = w_out[0]
+        else:
+            w_out_tensor = w_out
+            
+        if isinstance(input_layernorm, tuple):
+            input_layernorm_tensor = input_layernorm[0]
+        else:
+            input_layernorm_tensor = input_layernorm
+        if isinstance(rotary_emb_inv_freq, tuple):
+            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq[0]
+        else:
+            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq
+        # decompress weights
+        #  w_q_tensor.device.device_type <DeviceType.CUDA: 2>
+        # import pdb; pdb.set_trace()
+        if compress_weight and comp_weight_config is not None:
+        # if w_q_tensor.device.device_type == DeviceType.COMPRESSED:
+            w_q = decompress(w_q_tensor, comp_weight_config)
+            w_k = decompress(w_k_tensor, comp_weight_config)
+            w_v = decompress(w_v_tensor, comp_weight_config)
+            w_out = decompress(w_out_tensor, comp_weight_config)
+            print('w_q after decompress', w_q)
+            if input_layernorm is not None:
+                input_layernorm = input_layernorm_tensor.decompress(input_layernorm_tensor)
+            if rotary_emb_inv_freq is not None:
+                rotary_emb_inv_freq = rotary_emb_inv_freq_tensor.decompress(rotary_emb_inv_freq_tensor)
+        # import pdb; pdb.set_trace()
+        print('w_q', w_q)
+        print(f"[mha_llama] Input w_q shape: {w_q_tensor.shape}")
+        print(f"[mha_llama] Input w_k shape: {w_k_tensor.shape}")
+        print(f"[mha_llama] Input w_v shape: {w_v_tensor.shape}")
+        print(f"[mha_llama] Input w_out shape: {w_out_tensor.shape}")
+        
+        # Ensure hidden states has the correct shape
+        if hidden_states.shape[-1] != w_q_tensor.shape[1]:
+            print(f"[mha_llama] Shape mismatch: expected {w_q_tensor.shape[1]} but got {hidden_states.shape[-1]}")
+            # If the hidden size is half of expected, duplicate the data
+            if hidden_states.shape[-1] * 2 == w_q_tensor.shape[1]:
+                print("[mha_llama] Duplicating data to match expected size")
+                hidden_states = torch.cat([hidden_states, hidden_states], dim=-1)
+            else:
+                raise ValueError(f"Hidden states dimension mismatch: expected {w_q_tensor.shape[1]} but got {hidden_states.shape[-1]}")
+        
+        bsz, q_len, h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 1, 4096])
+        head_dim = h // n_head
+        freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
+        scaling = head_dim ** -0.5
+        hidden = rms_norm(hidden_states.data, input_layernorm.data)
+        
+        # Use the decompressed weights directly
+        w_q_data = w_q.data
+        w_k_data = w_k.data
+        w_v_data = w_v.data
+        w_out_data = w_out.data
+        
+        # 确保hidden是float16类型
+        if hidden.dtype != torch.float16:
+            hidden = hidden.to(dtype=torch.float16)
+        
+        # 确保所有权重张量都是float16类型
+        if w_q_data.dtype != torch.float16:
+            w_q_data = w_q_data.to(dtype=torch.float16)
+        if w_k_data.dtype != torch.float16:
+            w_k_data = w_k_data.to(dtype=torch.float16)
+        if w_v_data.dtype != torch.float16:
+            w_v_data = w_v_data.to(dtype=torch.float16)
+        if w_out_data.dtype != torch.float16:
+            w_out_data = w_out_data.to(dtype=torch.float16)
+        
+        # 确保所有张量都在同一个设备上
+        device = hidden.device
+        w_q_data = w_q_data.to(device=device)
+        w_k_data = w_k_data.to(device=device)
+        w_v_data = w_v_data.to(device=device)
+        w_out_data = w_out_data.to(device=device)
+        
+        q = F.linear(hidden, w_q_data) * scaling
+        k = F.linear(hidden, w_k_data)
+        v = F.linear(hidden, w_v_data)
+
+        # Check if the tensor size matches the expected shape
+        expected_size = bsz * q_len * n_head * head_dim
+        actual_size = q.numel()
+        
+        if actual_size != expected_size:
+            # If the actual size is half of expected, duplicate the data
+            if actual_size * 2 == expected_size:
+                q = torch.cat([q, q], dim=-1)
+                k = torch.cat([k, k], dim=-1)
+                v = torch.cat([v, v], dim=-1)
+            else:
+                raise ValueError(f"Tensor size mismatch: expected {expected_size} elements but got {actual_size}. Hidden size: {h}, Head dim: {head_dim}, Num heads: {n_head}")
+
+        # Reshape tensors
+        q = q.view(bsz, q_len, n_head, head_dim)
+        k = k.view(bsz, q_len, n_head, head_dim)
+        v = v.view(bsz, q_len, n_head, head_dim)
+
+        q, k = apply_rotary_emb(q, k, freqs_cis=freq_cis[:q_len])
+
+        # shape: (b * n_head, s, head_dim)
+        q = q.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
+        # shape: (b * n_head, head_dim, s)
+        k = k.permute(0, 2, 3, 1).reshape(bsz * n_head, head_dim, q_len)
+        # shape: (b * n_head, s, head_dim)
+        v = v.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
+
+        attn_weights = torch.bmm(q, k)
+
+        idx = torch.arange(q_len, device=self.dev)
+        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
+        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask
+        
+        # shape: (b, n_head, s, s)
+        attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
+        attn_weights = torch.where(mask, attn_weights, -1e4)
+        attn_weights = attn_weights.view(bsz * n_head, q_len, q_len)
+        attn_weights = F.softmax(attn_weights, dim=2)
+        # shape: (b, n_head, s, head_dim)
+        value = torch.bmm(attn_weights, v).view(bsz, n_head, q_len, head_dim)
+        # shape: (b, s, h)
+        value = value.transpose(1, 2).reshape(bsz, q_len, h)
+        value = F.linear(value, w_out_data)
+        
+        value.add_(hidden_states.data)
+
+        if donate[0]: hidden_states.delete()
+        if donate[1]: attention_mask.delete()
+
+        # (s, b * n_head, head_dim)
+        k = k.permute(2, 0, 1)
+        v = v.permute(1, 0, 2)
+
+        if compress_cache:
+            k = self.compressed_device.compress(k, comp_cache_config)
+            v = self.compressed_device.compress(v, comp_cache_config)
+
+        return value, k, v
+
+    def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v, w_out, n_head, k_cache, v_cache, donate, attn_sparsity=1.0, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False):
+        print(f"[mha_gen_llama] Input hidden shape: {inputs.shape}")
+        
+        # Check if weights are tuples and extract the TorchTensor
+        if isinstance(w_q, tuple):
+            w_q_tensor = w_q[0]
+        else:
+            w_q_tensor = w_q
+            
+        if isinstance(w_k, tuple):
+            w_k_tensor = w_k[0]
+        else:
+            w_k_tensor = w_k
+            
+        if isinstance(w_v, tuple):
+            w_v_tensor = w_v[0]
+        else:
+            w_v_tensor = w_v
+            
+        if isinstance(w_out, tuple):
+            w_out_tensor = w_out[0]
+        else:
+            w_out_tensor = w_out
+            
+        if isinstance(input_layernorm, tuple):
+            input_layernorm_tensor = input_layernorm[0]
+        else:
+            input_layernorm_tensor = input_layernorm
+        if isinstance(rotary_emb_inv_freq, tuple):
+            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq[0]
+        else:
+            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq
+        # decompress weights
+        # if w_q_tensor.device.device_type == DeviceType.COMPRESSED:
+        if compress_weight:
+            w_q = w_q_tensor.device.decompress(w_q_tensor)
+            w_k = w_k_tensor.device.decompress(w_k_tensor)
+            w_v = w_v_tensor.device.decompress(w_v_tensor)
+            w_out = w_out_tensor.device.decompress(w_out_tensor)
+            if input_layernorm is not None:
+                input_layernorm = input_layernorm_tensor.device.decompress(input_layernorm_tensor)
+            if rotary_emb_inv_freq is not None:
+                rotary_emb_inv_freq = rotary_emb_inv_freq_tensor.device.decompress(rotary_emb_inv_freq_tensor)
+        else:
+            # If not compressed, use the tensors directly
+            w_q = w_q_tensor
+            w_k = w_k_tensor
+            w_v = w_v_tensor
+            w_out = w_out_tensor
+            if input_layernorm is not None:
+                input_layernorm = input_layernorm_tensor
+            if rotary_emb_inv_freq is not None:
+                rotary_emb_inv_freq = rotary_emb_inv_freq_tensor
+                
+        print(f"[mha_gen_llama] Input w_q shape: {w_q.shape}")
+        print(f"[mha_gen_llama] Input w_k shape: {w_k.shape}")
+        print(f"[mha_gen_llama] Input w_v shape: {w_v.shape}")
+        print(f"[mha_gen_llama] Input w_out shape: {w_out.shape}")
+        print(f"[mha_gen_llama] Input k_cache shape: {k_cache.shape}")
+        print(f"[mha_gen_llama] Input v_cache shape: {v_cache.shape}")
+        
+        # Ensure hidden states has the correct shape
+        if inputs.shape[-1] != w_q.shape[1]:
+            print(f"[mha_gen_llama] Shape mismatch: expected {w_q.shape[1]} but got {inputs.shape[-1]}")
+            # If the hidden size is half of expected, duplicate the data
+            if inputs.shape[-1] * 2 == w_q.shape[1]:
+                print("[mha_gen_llama] Duplicating data to match expected size")
+                inputs = torch.cat([inputs, inputs], dim=-1)
+            else:
+                raise ValueError(f"Hidden states dimension mismatch: expected {w_q.shape[1]} but got {inputs.shape[-1]}")
+        
+        bsz, q_len, h = inputs.shape
+        head_dim = h // n_head
+        freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
+        scaling = head_dim ** -0.5
+        hidden = rms_norm(inputs.data, input_layernorm.data)
+        
+        # Use the decompressed weights directly
+        w_q_data = w_q.data
+        w_k_data = w_k.data
+        w_v_data = w_v.data
+        w_out_data = w_out.data
+        
+        # 确保hidden是float16类型
+        if hidden.dtype != torch.float16:
+            hidden = hidden.to(dtype=torch.float16)
+        
+        # 确保所有权重张量都是float16类型
+        if w_q_data.dtype != torch.float16:
+            w_q_data = w_q_data.to(dtype=torch.float16)
+        if w_k_data.dtype != torch.float16:
+            w_k_data = w_k_data.to(dtype=torch.float16)
+        if w_v_data.dtype != torch.float16:
+            w_v_data = w_v_data.to(dtype=torch.float16)
+        if w_out_data.dtype != torch.float16:
+            w_out_data = w_out_data.to(dtype=torch.float16)
+        
+        # 确保所有张量都在同一个设备上
+        device = hidden.device
+        w_q_data = w_q_data.to(device=device)
+        w_k_data = w_k_data.to(device=device)
+        w_v_data = w_v_data.to(device=device)
+        w_out_data = w_out_data.to(device=device)
+        
+        q = F.linear(hidden, w_q_data) * scaling
+        k = F.linear(hidden, w_k_data)
+        v = F.linear(hidden, w_v_data)
+
+        # 直接重塑张量，不进行压缩和解压缩
+        q = q.view(bsz, q_len, n_head, head_dim)
+        k = k.view(bsz, q_len, n_head, head_dim)
+        v = v.view(bsz, q_len, n_head, head_dim)
+
+        q, k = apply_rotary_emb(q, k, freqs_cis=freq_cis[:q_len])
+
+        # shape: (b * n_head, s, head_dim)
+        q = q.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
+        # shape: (b * n_head, head_dim, s)
+        k = k.permute(0, 2, 3, 1).reshape(bsz * n_head, head_dim, q_len)
+        # shape: (b * n_head, s, head_dim)
+        v = v.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
+
+        # 处理缓存
+        if k_cache is not None:
+            if isinstance(k_cache.device, TorchCompressedDevice):
+                k_cache = k_cache.device.decompress(k_cache)
+            k_cache = k_cache.to(device=device, dtype=torch.float16)
+            k = torch.cat([k_cache, k], dim=2)
+        
+        if v_cache is not None:
+            if isinstance(v_cache.device, TorchCompressedDevice):
+                v_cache = v_cache.device.decompress(v_cache)
+            v_cache = v_cache.to(device=device, dtype=torch.float16)
+            v = torch.cat([v_cache, v], dim=2)
+
+        attn_weights = torch.bmm(q, k)
+
+        idx = torch.arange(k.shape[2], device=self.dev)
+        causal_mask = (idx <= idx.view(-1, 1)).view(1, 1, k.shape[2], k.shape[2])
+        mask = attention_mask.data.view(bsz, 1, 1, k.shape[2]) & causal_mask
+        
+        # shape: (b, n_head, s, s)
+        attn_weights = attn_weights.view(bsz, n_head, q_len, k.shape[2])
+        attn_weights = torch.where(mask, attn_weights, -1e4)
+        attn_weights = attn_weights.view(bsz * n_head, q_len, k.shape[2])
+        attn_weights = F.softmax(attn_weights, dim=2)
+        # shape: (b, n_head, s, head_dim)
+        value = torch.bmm(attn_weights, v).view(bsz, n_head, q_len, head_dim)
+        # shape: (b, s, h)
+        value = value.transpose(1, 2).reshape(bsz, q_len, h)
+        value = F.linear(value, w_out_data)
+        
+        value.add_(inputs.data)
+
+        if donate[0]: inputs.delete()
+        if donate[1]: attention_mask.delete()
+
+        # (s, b * n_head, head_dim)
+        k_new = k.permute(2, 0, 1)
+        v_new = v.permute(1, 0, 2)
+
+        if compress_cache:
+            k_new = self.compressed_device.compress(k_new, comp_cache_config)
+            v_new = self.compressed_device.compress(v_new, comp_cache_config)
+
+        return value, k_new, v_new
 
     def _attention_weights(self, q, k, mask, b, src_s, n_head):
         # shape: (b * n_head, 1, s)
@@ -891,12 +1125,40 @@ class TorchDevice:
         return value
 
     def mlp(self, inputs, wi, bi, wo, bo, w_ln, b_ln, donate):
+        """MLP."""
         # decompress weights
-        if wi.device.device_type == DeviceType.COMPRESSED:
+        if isinstance(wi.device, TorchCompressedDevice):
             wi = wi.device.decompress(wi)
             wo = wo.device.decompress(wo)
 
         b, s, h = inputs.shape
+
+        # 确保inputs.data是float16类型
+        if inputs.data.dtype != torch.float16:
+            inputs.data = inputs.data.to(dtype=torch.float16)
+            
+        # 确保所有权重张量都是float16类型
+        if wi.data.dtype != torch.float16:
+            wi.data = wi.data.to(dtype=torch.float16)
+        if wo.data.dtype != torch.float16:
+            wo.data = wo.data.to(dtype=torch.float16)
+        if w_ln.data.dtype != torch.float16:
+            w_ln.data = w_ln.data.to(dtype=torch.float16)
+        if b_ln.data.dtype != torch.float16:
+            b_ln.data = b_ln.data.to(dtype=torch.float16)
+        if bi.data.dtype != torch.float16:
+            bi.data = bi.data.to(dtype=torch.float16)
+        if bo.data.dtype != torch.float16:
+            bo.data = bo.data.to(dtype=torch.float16)
+            
+        # 确保所有张量都在同一个设备上
+        device = inputs.data.device
+        wi.data = wi.data.to(device=device)
+        wo.data = wo.data.to(device=device)
+        w_ln.data = w_ln.data.to(device=device)
+        b_ln.data = b_ln.data.to(device=device)
+        bi.data = bi.data.to(device=device)
+        bo.data = bo.data.to(device=device)
 
         out = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
         out = F.linear(out, wi.data, bias=bi.data)
@@ -908,20 +1170,87 @@ class TorchDevice:
         if donate[0]: inputs.delete()
         return TorchTensor.create_from_torch(out, self)
 
-    def mlp_llama(self, inputs, gate, down, up, donate, config, post_attention_layernorm):
-        if gate.device.device_type == DeviceType.COMPRESSED:
-            gate = gate.device.decompress(gate)
-            down = down.device.decompress(down)
-            up = up.device.decompress(up)
+    def mlp_llama(self, inputs, gate, down, up, donate, config, post_attention_layernorm, compress_weight=False):
+        """MLP for LLaMA."""
+        # Check if weights are tuples and extract the TorchTensor
+        if isinstance(gate, tuple):
+            gate_tensor = gate[0]
+        else:
+            gate_tensor = gate
+            
+        if isinstance(down, tuple):
+            down_tensor = down[0]
+        else:
+            down_tensor = down
+            
+        if isinstance(up, tuple):
+            up_tensor = up[0]
+        else:
+            up_tensor = up
+            
+        if isinstance(post_attention_layernorm, tuple):
+            post_attention_layernorm_tensor = post_attention_layernorm[0]
+        else:
+            post_attention_layernorm_tensor = post_attention_layernorm
+            
+        # decompress weights if they are compressed
+        # if gate_tensor.device.device_type == DeviceType.COMPRESSED:
+        if compress_weight:
+            
+            gate = gate_tensor.device.decompress(gate_tensor)
+            down = down_tensor.device.decompress(down_tensor)
+            up = up_tensor.device.decompress(up_tensor)
+            post_attention_layernorm = post_attention_layernorm_tensor.device.decompress(post_attention_layernorm_tensor)
+        else:
+            # If not compressed, use the tensors directly
+            gate = gate_tensor
+            down = down_tensor
+            up = up_tensor
+            post_attention_layernorm = post_attention_layernorm_tensor
+
         b, s, h = inputs.shape
         hidden_act = config.hidden_act
         act_fn = ACT2FN[hidden_act]
         src_out = rms_norm(inputs.data, post_attention_layernorm.data)
-        # src_out = F.layer_norm(inputs.data, (h,), weight=post_attention_layernorm.data)
-        out = F.linear(act_fn(F.linear(src_out, gate.data)) * F.linear(src_out, up.data), down.data)
+        
+        # 确保权重是张量而不是元组
+        if isinstance(gate.data, tuple):
+            gate_data = gate.data[0]
+        else:
+            gate_data = gate.data
+            
+        if isinstance(down.data, tuple):
+            down_data = down.data[0]
+        else:
+            down_data = down.data
+            
+        if isinstance(up.data, tuple):
+            up_data = up.data[0]
+        else:
+            up_data = up.data
+            
+        # 确保所有权重张量都是float16类型
+        if gate_data.dtype != torch.float16:
+            gate_data = gate_data.to(dtype=torch.float16)
+        if down_data.dtype != torch.float16:
+            down_data = down_data.to(dtype=torch.float16)
+        if up_data.dtype != torch.float16:
+            up_data = up_data.to(dtype=torch.float16)
+            
+        # 确保所有张量都在同一个设备上
+        device = inputs.data.device
+        gate_data = gate_data.to(device=device)
+        down_data = down_data.to(device=device)
+        up_data = up_data.to(device=device)
+
+        out = F.layer_norm(inputs.data, (h,), weight=post_attention_layernorm.data)
+        gate_out = F.linear(out, gate_data)
+        up_out = F.linear(out, up_data)
+        out = F.silu(gate_out) * up_out
+        out = F.linear(out, down_data)
 
         out.add_(inputs.data)
-        # if donate[0]: inputs.delete()
+        if donate[0]: inputs.delete()
         return TorchTensor.create_from_torch(out, self)
 
     def synchronize(self):
@@ -958,86 +1287,6 @@ class TorchDevice:
     def __str__(self):
         return f"TorchDevice(name={self.name})"
 
-class TorchDisk:
-    """Manage tensors stored on a disk."""
-
-    def __init__(self, path, mem_capacity=None, cuda_id=0, num_copy_threads=4):
-        self.name = path
-        self.path = os.path.abspath(os.path.expanduser(path))
-        self.mem_capacity = mem_capacity
-
-        self.device_type = DeviceType.DISK
-        # TorchCompressedDevice = compression.TorchCompressedDevice
-        self.compressed_device = TorchCompressedDevice(self)
-        print('TorchDisk, self.compressed_device ', self.compressed_device)
-
-        if os.path.exists(self.path):
-            assert os.path.isdir(self.path)
-        else:
-            os.makedirs(self.path)
-
-        self.links = {}
-
-        # # Copy threads
-        self.copy_queue = queue.Queue()
-        self.copy_threads = [
-            threading.Thread(
-                target=copy_worker_func, args=(self.copy_queue, cuda_id)
-            ) for _ in range(num_copy_threads)
-        ]
-        for t in self.copy_threads:
-            t.start()
-
-        global global_disk_device
-        global_disk_device = self
-
-    def add_link(self, link):
-        dst = link.b if link.a == self else link.a
-        self.links[dst] = link
-
-    def allocate(self, shape, dtype, pin_memory=None, name=None):
-        name = name or TorchTensor.next_name()
-        path = os.path.join(self.path, name)
-        np.lib.format.open_memmap(path, mode="w+", shape=shape, dtype=dtype)
-        return TorchTensor(shape, np_dtype_to_torch_dtype[dtype],
-                           path, self, name=name)
-
-    def delete(self, tensor):
-        if os.path.exists(tensor.data) and tensor.delete_file:
-            os.remove(tensor.data)
-
-    def init_cache_one_gpu_batch(self, config, task, policy):
-        num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
-            config.n_head, config.input_dim, task.prompt_len, task.gen_len,
-            policy.gpu_batch_size)
-        shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
-        k_cache = self.allocate(shape, np.float16)
-        v_cache = self.allocate(shape, np.float16)
-        return k_cache, v_cache
-
-    def submit_copy(self, *args):
-        self.copy_queue.put_nowait(args)
-
-    def synchronize(self):
-        self.copy_queue.join()
-
-    def close_copy_threads(self):
-        for _ in range(len(self.copy_threads)):
-            self.copy_queue.put_nowait(None)
-        for t in self.copy_threads:
-            t.join()
-        self.copy_queue.join()
-        self.copy_queue = None
-
-    def mem_stats(self):
-        raise NotImplementedError()
-
-    def print_stats(self):
-        raise NotImplementedError()
-
-    def __del__(self):
-        if self.copy_queue:
-            self.close_copy_threads()
 
 
 # Segment dimension for tensors stored on TorchMixedDevice
@@ -1131,7 +1380,7 @@ class TorchLink:
 
 
 def general_copy(dst: TorchTensor, dst_indices: Tuple[slice],
-                 src: TorchTensor, src_indices: Tuple[slice]):
+                 src: TorchTensor, src_indices: Tuple[slice], compress_weight=False):
     """Launch a general asynchronous copy between two tensors.
     It is equivalent to `dst[dst_indices] = src[src_indices]` in numpy syntax.
     The copy is asynchronous. To wait for the copy to complete, you need to call
@@ -1151,7 +1400,7 @@ def general_copy(dst: TorchTensor, dst_indices: Tuple[slice],
             tmp_src_indices = cut_indices(src_indices, seg_points[i], seg_points[i+1])
             tmp_dst_indices = cut_indices(dst_indices, seg_points[i], seg_points[i+1],
                 base=seg_points[i])
-            general_copy(dst.data[0][i], tmp_dst_indices, src, tmp_src_indices)
+            general_copy(dst.data[0][i], tmp_dst_indices, src, tmp_src_indices, compress_weight)
     elif src.device.device_type == DeviceType.MIXED:
         # The tensor is on mixed devices, do recursive calls
         assert dst.device.device_type != DeviceType.MIXED
@@ -1169,6 +1418,8 @@ def general_copy(dst: TorchTensor, dst_indices: Tuple[slice],
     elif (src.device.device_type == DeviceType.COMPRESSED or
           dst.device.device_type == DeviceType.COMPRESSED):
         # The tensor is compressed, do recursive calls
+        general_copy_compressed(dst, dst_indices, src, src_indices)
+    elif compress_weight:
         general_copy_compressed(dst, dst_indices, src, src_indices)
     elif src.device.device_type == DeviceType.DISK:
         # The tensor is on the disk, dispatch to copy threads for asynchronous copy

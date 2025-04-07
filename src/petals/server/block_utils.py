@@ -10,7 +10,7 @@ from petals.utils.misc import get_size_in_bytes
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
+from petals.flexgen_utils.base import fix_recursive_import
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 
 

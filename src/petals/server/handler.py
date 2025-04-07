@@ -202,6 +202,7 @@ class TransformerConnectionHandler(ConnectionHandler):
                     step_=0
                     print('before async for output_tensors, can_push, step_metadata in iterate_rpc_inference() ') ###
                     # print_time_now('')
+                    
                     async for output_tensors, can_push, step_metadata in iterate_rpc_inference(
                         requested_uids=requested_uids,
                         requested_backends=requested_backends,

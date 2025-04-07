@@ -128,6 +128,8 @@ def quantize_module(model: nn.Module, *, quant_type: QuantType) -> nn.Module:
                     module.bias is not None,
                     compress_statistics=compress_statistics,
                 )
+                # print('model.weight.data ', module.weight.data)
+                # import pdb;pdb.set_trace()
                 model._modules[n].weight = bnb.nn.Params4bit(
                     module.weight.data,
                     requires_grad=False,
@@ -135,6 +137,7 @@ def quantize_module(model: nn.Module, *, quant_type: QuantType) -> nn.Module:
                     blocksize=64,
                     compress_statistics=compress_statistics,
                 ).to(module.weight.dtype)
+                
             else:
                 raise ValueError(f"Unsupported quant_type='{quant_type}'")
             model._modules[n].bias = module.bias

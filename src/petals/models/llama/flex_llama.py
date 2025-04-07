@@ -12,17 +12,19 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from flexgen.compression import CompressionConfig
-from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import fix_recursive_import, general_copy, DeviceType, TorchDevice, TorchDisk, \
-    TorchMixedDevice
-from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
+from petals.flexgen_utils.compression import CompressionConfig
+from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from petals.flexgen_utils.base import fix_recursive_import, DeviceType
+from petals.flexgen_utils.torch_device import TorchDevice, TorchDisk, TorchMixedDevice
+from petals.flexgen_utils.torch_tensor import TorchTensor
+from petals.flexgen_utils.task import Task
+from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
+from petals.flexgen_utils.utils import ( GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
-    torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
-    read_benchmark_log)
+    torch_dtype_to_np_dtype, np_dtype_to_torch_dtype)
 from torch import nn
 from transformers import AutoTokenizer
-from flexgen.timer import timers
+from petals.flexgen_utils.timer import timers
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 fix_recursive_import()
@@ -129,6 +131,7 @@ def init_weight_list(weight_specs, policy, env):
     sizes = [np.prod(spec[0]) for spec in weight_specs]
     sizes_cumsum = np.cumsum(sizes)
     ret = []
+    petals_weights=[]
     for i in range(len(weight_specs)):
         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
         # print('mid_percent ', mid_percent)
@@ -160,6 +163,7 @@ def init_weight_list(weight_specs, policy, env):
         else:
             # 检查压缩设备是否可用
             if hasattr(home, 'compressed_device') and home.compressed_device is not None:
+                # 使用原始形状，不进行调整
                 weight = home.compressed_device.allocate(
                     shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
 
@@ -189,10 +193,12 @@ def init_weight_list(weight_specs, policy, env):
                         weight.load_from_np(np.random.rand(*shape).astype(dtype))
                 else:
                     weight.load_from_np(np.ones(shape, dtype))
-        # print('weight.data ', weight.data)
+        print('weight.data ', weight.data) # tuple: (data, scale, comp_config)
+        print('weight ', weight)
         ret.append(weight)
+        petals_weights.append(weight.data)
         
-    return ret
+    return ret, petals_weights
 
 # 添加一个新函数，用于从 PyTorch 模型加载权重到 FlexGen 格式
 def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index):
@@ -224,16 +230,18 @@ def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index
     try:
         # 初始化权重列表
         weights = init_weight_list(weight_specs, policy, env)
-        
+        # print('weights ', weights)
+        petals_weights = []
         # 将权重加载到模型中
         for (name, _), weight in zip(model.named_parameters(), weights):
             param = getattr(model, name)
             param.data = weight.data.to(param.device)
-        
+            print('param', param)
+            petals_weights.append(param.data)
         # 存储权重规格，以便后续使用
         weight_home[block_index] = weight_specs
-        
-        return weights
+        print('petals_weights ', petals_weights)
+        return petals_weights
     except Exception as e:
         print(f"Warning: Failed to initialize weights with FlexGen: {e}")
         print("Falling back to direct parameter assignment")
@@ -248,542 +256,8 @@ def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index
         
         return []
 
-# class InputEmbed:
-#     def __init__(self, config, env, policy):
-#         self.config = config
-#         self.env = env
-#         self.policy = policy
-#         self.compute = self.env.gpu
-#         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-#             else self.compute)
 
-#         self.task = None
-#         self.token_type_embeddings = nn.Embedding(
-#             config.type_vocab_size, config.input_dim, device="cuda:0"
-#         )
 
-#     def set_task(self, task):
-#         self.task = task
-
-#     def init_weight(self, weight_home, path):
-#         v, h, dtype = (self.config.vocab_size, self.config.input_dim, self.config.dtype)
-#         path = os.path.join(path, "")
-#         weight_specs = [
-#             ((v, h), dtype, path + "embed_tokens.weight"),
-#             ]
-#         weights = init_weight_list(weight_specs, self.policy, self.env)
-#         weight_home.store(weights)
-
-#     def load_weight(self, weight_home, weight_read_buf, k):
-#         w_token = weight_home.val[0]
-#         if k == 0:
-#             dst = self.weight_load_dst
-#             weight_read_buf.store((w_token.smart_copy(dst)))
-
-#     def init_cache_one_gpu_batch(self, cache_home):
-#         pass  # do nothing
-
-#     def load_cache(self, cache_home, cache_read_buf, i):
-#         pass  # do nothing
-
-#     def store_cache(self, cache_home, cache_write_buf, i):
-#         pass  # do nothing
-
-#     def input_act_shape_and_dtype(self, batch_size, seq_len):
-#         return (batch_size, seq_len), np.int64
-
-#     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
-#                 cache_write_buf, i, k):
-#         # Compute input embedding 
-#         donate = [False] * 3
-#         h, donate[0] = hidden.val, True
-#         mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-
-#         if k == self.policy.num_gpu_batches - 1:
-#             # Clear the weight_read_buf if it is the last gpu batch
-#             (w_token, donate[2]) = weight_read_buf.pop()
-#         else:
-#             (w_token, _) = weight_read_buf.val
-#         h = self.compute.llama_input_embed(h, mask,
-#             w_token, self.config.pad_token_id, donate, self.token_type_embeddings)
-#         hidden.val = h
-
-
-# class LlamaRMSNorm(nn.Module):
-#     def __init__(
-#         self,
-#         config: LlamaConfig,
-#         env: ExecutionEnv,
-#         policy: Policy,
-#         layer_id: int,
-#     ):
-#         super().__init__()
-#         self.config = config
-#         self.env = env
-#         self.layer_id = layer_id
-#         self.policy = policy
-#         self.compute = self.env.gpu
-#         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-#                                 else self.compute)
-
-#         self.task = None
-#         self.weight = nn.Parameter(torch.ones(hidden_size))
-#         self.variance_epsilon = eps
-
-#     def set_task(self, task):
-#         self.task = task
-
-#     def init_weight(self, weight_home, path):
-#         intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
-#         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-#         weight_specs = [
-#             # 4 weight files
-#             # gate_proj
-#             ((intermediate_size, h), dtype, path + "mlp.gate_proj.weight"),
-#             # down_proj
-#             ((h, intermediate_size), dtype, path + "mlp.down_proj.weight"),
-#             # up_proj
-#             ((intermediate_size, h), dtype, path + "mlp.up_proj.weight"),
-#             # post attention layer norm
-#             ((h, ), dtype, path + "post_attention_layernorm.weight"),
-#         ]
-#         weights = init_weight_list(weight_specs, self.policy, self.env)
-#         weight_home.store(weights)
-
-#     def load_weight(self, weight_home, weight_read_buf, k):
-#         gate, down, up, post_attention_layernorm = weight_home.val
-#         if k == 0:
-#             dst1 = self.weight_load_dst
-#             dst2 = self.compute
-#             weight_read_buf.store((
-#                     gate.smart_copy(dst1),
-#                     down.smart_copy(dst1),
-#                     up.smart_copy(dst1),
-#                     post_attention_layernorm.smart_copy(dst2)
-#             ))
-
-#     def init_cache_one_gpu_batch(self, cache_home):
-#         pass  # do nothing
-
-#     def load_cache(self, cache_home, cache_read_buf, i):
-#         pass  # do nothing
-
-#     def store_cache(self, cache_home, cache_write_buf, i):
-#         pass  # do nothing
-
-#     def input_act_shape_and_dtype(self, batch_size, seq_len):
-#         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
-
-#     def forward(self, 
-#         x,
-#         cache_read_buf,
-#         weight_read_buf,
-#         attention_mask,
-#         cache_write_buf,
-#         i=0,
-#         k: int = 0
-#         ):
-#         donate = [False] * 9
-#         h, donate[0] = x.val, True
-
-#         if k == self.policy.num_gpu_batches - 1:
-#             # Clear the weight_read_buf if it is the last gpu batch
-#             ((gate, donate[1]), (down, donate[3]),
-#              (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
-#         else:
-#             ((gate, _), (down, _),
-#              (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
-
-#         h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
-#         x.val = h
-
-
-
-class FLEX_LlamaAttention(LlamaAttention):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
-        
-        super().__init__(config)
-        self.config = config
-        self.llama_config = get_llama_config('huggyllama/llama-7b')
-        # self.config.input_dim = self.config.hidden_size
-        # self.config.dtype= np.float16
-        self.num_heads = config.num_attention_heads
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-                                else self.compute)
-        self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
-                                  else self.env.gpu)
-        
-        self.task = None
-
-    def set_task(self, task):
-        self.task = task
-
-    def init_weight(self, weight_home, path):
-        # h, dtype = (self.config.input_dim, self.config.dtype)
-        h, dtype = (self.config.hidden_size, np.float16)
-        path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        weight_specs = [
-            # 5 weight files
-            # w_q
-            ((h, h), dtype, path + "self_attn.q_proj.weight"),
-            # w_k
-            ((h, h), dtype, path + "self_attn.k_proj.weight"),
-            # w_v
-            ((h, h), dtype, path + "self_attn.v_proj.weight"),
-            # w_out
-            ((h, h), dtype, path + "self_attn.o_proj.weight"),
-            # input layer norm
-            ((h, ), dtype, path + "input_layernorm.weight"),
-            # rotary_embed
-            ((64, ), dtype, path + "self_attn.rotary_emb.inv_freq"),
-        ]
-        # print('init weights of LLamaAttention ')
-        see_memory_usage("-----------------------------------------before init weights of LLamaAttention ")
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        see_memory_usage("-----------------------------------------after init weights of LLamaAttention ")
-        weight_home.store(weights)
-
-    def load_weight(self, weight_home, weight_read_buf, k):
-        w_q, w_k, w_v, w_out, input_layernorm, rotary_emb_inv_freq = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((
-                w_q.smart_copy(dst1),
-                w_k.smart_copy(dst1),
-                w_v.smart_copy(dst1),
-                w_out.smart_copy(dst1),
-                input_layernorm.smart_copy(dst2),
-                rotary_emb_inv_freq.smart_copy(dst2),
-            ))
-            
-    def init_cache_one_gpu_batch(self, cache_home):
-        if self.policy.cache_gpu_percent == 100:
-            device = self.env.gpu
-        elif self.policy.cache_cpu_percent == 100:
-            device = self.env.cpu
-        elif self.policy.cache_disk_percent == 100:
-            device = self.env.disk
-        else:
-            device = self.env.mixed
-
-        if self.policy.compress_cache:
-            assert device.device_type != DeviceType.MIXED
-            device = device.compressed_device
-
-        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
-        cache_home.store(cache)
-
-    def load_cache(self, cache_home, cache_read_buf, i):
-        if i == 0:  # prefill, no cache
-            return
-
-        k_home, v_home = cache_home.val
-
-        # Pick code path
-        if self.policy.compress_cache:
-            path = 0
-            dst = self.attention_compute.compressed_device
-        else:
-            if self.policy.cpu_cache_compute:
-                if (k_home.device.device_type == DeviceType.MIXED and
-                        k_home.data[0][0] is not None):
-                    path = 2
-                else:
-                    path = 1
-            else:
-                path = 0
-            dst = self.attention_compute
-
-        if path == 0:  # Direct copy
-            # shape: (s, b * n_head, head_dim)
-            indices = (slice(0, self.task.prompt_len + i),
-                       slice(0, k_home.shape[1]))
-
-            if self.policy.attn_sparsity >= 1.0:
-                cache_read_buf.store((
-                    k_home.smart_copy(dst, indices),
-                    v_home.smart_copy(dst, indices),
-                ))
-            else:
-                cache_read_buf.store((
-                    k_home.smart_copy(dst, indices),
-                    (v_home, False),
-                ))
-        elif path == 1:  # Copy to CPU temporary workspace
-            # shape: (s, b * n_head, head_dim)
-            k_buf, v_buf = dst.next_attention_compute_workspace()
-            indices = (slice(0, self.task.prompt_len + i - 1),
-                       slice(0, k_home.shape[1]))
-            general_copy(k_buf, indices, k_home, indices)
-
-            if self.policy.attn_sparsity >= 1.0:
-                general_copy(v_buf, indices, v_home, indices)
-                cache_read_buf.store(((k_buf, False), (v_buf, False)))
-            else:
-                cache_read_buf.store(((k_buf, False), ((v_home, v_buf), False)))
-        elif path == 2:  # Copy to both GPU and CPU
-            # The caches are stored on both GPU and other devices.
-            # Compute attention on gpu for caches stored on gpu.
-            # Compute attention on cpu for caches stored on cpu/disk.
-            gpu_k_buf = k_home.data[0][0]
-            gpu_v_buf = v_home.data[0][0]
-
-            # shape: (s, b * n_head, head_dim)
-            k_buf, v_buf = dst.next_attention_compute_workspace()
-            indices = (slice(0, self.task.prompt_len + i - 1),
-                       slice(gpu_k_buf.shape[1], k_home.shape[1]))
-            general_copy(k_buf, indices, k_home, indices)
-            general_copy(v_buf, indices, v_home, indices)
-            cache_read_buf.store((((gpu_k_buf, k_buf,), False),
-                                  ((gpu_v_buf, v_buf,), False)))
-            assert self.policy.attn_sparsity >= 1.0
-        else:
-            raise ValueError(f"Invalid path: {path}")
-
-    def store_cache(self, cache_home, cache_write_buf, i):
-        # shape: (s, b * n_head, head_dim)
-        k_home, v_home = cache_home.val
-        k_new, v_new = cache_write_buf.pop()
-
-        if i == self.task.gen_len - 1:  # last token, no need to store cache
-            return
-
-        if i == 0:  # prefill
-            indices = (slice(0, k_new.shape[0]),
-                       slice(0, k_new.shape[1]))
-        else:  # decoding
-            pos = self.task.prompt_len + i
-            indices = (slice(pos - k_new.shape[0], pos),
-                       slice(0, k_new.shape[1]))
-
-        general_copy(k_home, indices, k_new, None)
-        general_copy(v_home, indices, v_new, None)
-
-    def input_act_shape_and_dtype(self, batch_size, seq_len):
-        return (batch_size, seq_len, self.config.input_dim), self.config.dtype
-
-    def forward(
-        self,
-        hidden,
-        cache_read_buf,
-        weight_read_buf,
-        attention_mask,
-        cache_write_buf,
-        i,
-        k
-    ):
-        
-        # n_head = self.config.n_head 
-        n_head = self.config.num_attention_heads
-        
-
-        donate = [False] * 16
-        h, donate[0] = hidden.val, True
-
-        # k is batch index
-        if k == self.policy.num_gpu_batches - 1:
-            # Clear the weight_read_buf if it is the last gpu batch
-            ((w_q, donate[2]), (w_k, donate[4]), (w_v, donate[6]), (w_out, donate[8]), (input_layernorm, donate[10]), (rotary_emb_inv_freq, donate[12])) \
-                = weight_read_buf.pop()
-        else:
-            ((w_q, _), (w_k, _),  (w_v, _), (w_out, _), (input_layernorm, _), (rotary_emb_inv_freq, _)) = weight_read_buf.val
-
-        if i == 0:
-            # prefill
-            # import pdb;pdb.set_trace()---------------------
-            see_memory_usage("-----------------------------------------before mha_llama ")
-            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            h, new_k_cache, new_v_cache = self.compute.mha_llama(h, mask, w_q, w_k, w_v, w_out,
-                                       n_head, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_emb_inv_freq)
-            cache_write_buf.store((new_k_cache, new_v_cache))
-            see_memory_usage("-----------------------------------------after mha_llama ")
-        else:
-            # decoding
-            see_memory_usage("-----------------------------------------before mha_gen_llama ")
-            mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
-            (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
-            h, new_k_cache, new_v_cache = self.compute.mha_gen_llama(
-                h, mask, w_q,
-                w_k, w_v, w_out, n_head,
-                k_cache, v_cache, donate, self.policy.attn_sparsity,
-                self.policy.compress_cache, self.policy.comp_cache_config,
-                input_layernorm,
-                rotary_emb_inv_freq)
-            cache_write_buf.store((new_k_cache, new_v_cache))
-            see_memory_usage("-----------------------------------------after mha_gen_llama ")
-        hidden.val = h
-        
-        return h
-
-class FLEX_LlamaMLP(LlamaMLP):
-    def __init__(
-        self,
-        config: LlamaConfig,
-        env: ExecutionEnv,
-        policy: Policy,
-        layer_id: int,
-    ):
-        super().__init__(config)
-        self.config = config
-        self.llama_config = get_llama_config('huggyllama/llama-7b')
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-                                else self.compute)
-
-        self.task = None
-        self.temp_hidden_states = ValueHolder()
-
-    def set_task(self, task):
-        self.task = task
-
-    def init_weight(self, weight_home, path):
-        # print('self.llama_config ', self.llama_config)
-        # intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
-        intermediate_size, h, dtype = (self.config.intermediate_size, self.config.hidden_size, np.float16)
-        print('intermediate_size, h, dtype ', intermediate_size, h, dtype)
-        path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        weight_specs = [
-            # 4 weight files
-            # gate_proj
-            ((intermediate_size, h), dtype, path + "mlp.gate_proj.weight"),
-            # down_proj
-            ((h, intermediate_size), dtype, path + "mlp.down_proj.weight"),
-            # up_proj
-            ((intermediate_size, h), dtype, path + "mlp.up_proj.weight"),
-            # post attention layer norm
-            ((h, ), dtype, path + "post_attention_layernorm.weight"),
-        ]
-        see_memory_usage("-----------------------------------------before init weights of LLamaMLP ")
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        see_memory_usage("-----------------------------------------after init weights of LLamaMLP ")
-        weight_home.store(weights)
-
-    def load_weight(self, weight_home, weight_read_buf, k):
-        gate, down, up, post_attention_layernorm = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((
-                    gate.smart_copy(dst1),
-                    down.smart_copy(dst1),
-                    up.smart_copy(dst1),
-                    post_attention_layernorm.smart_copy(dst2)
-            ))
-
-    def init_cache_one_gpu_batch(self, cache_home):
-        pass  # do nothing
-
-    def load_cache(self, cache_home, cache_read_buf, i):
-        pass  # do nothing
-
-    def store_cache(self, cache_home, cache_write_buf, i):
-        pass  # do nothing
-
-    def input_act_shape_and_dtype(self, batch_size, seq_len):
-        return (batch_size, seq_len, self.config.input_dim), self.config.dtype
-
-    def forward(self, 
-        hidden_states,
-        cache_read_buf,
-        weight_read_buf,
-        attention_mask,
-        cache_write_buf,
-        position_ids,
-        k: int = 0
-        ):
-        donate = [False] * 9
-        h, donate[0] = hidden_states.val, True
-        # print('flex_llama.py MLP forward function  mlp h ,',  h)
-        if k == self.policy.num_gpu_batches - 1:
-            # Clear the weight_read_buf if it is the last gpu batch
-            ((gate, donate[1]), (down, donate[3]),
-             (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
-        else:
-            ((gate, _), (down, _),
-             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
-
-        h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
-        hidden_states.val = h
-        # print('flex_llama.py MLP forward function  h,',  h)
-        self.temp_hidden_states.val=h
-        
-        return h
-
-
-
-# class OutputEmbed:
-#     def __init__(self, config, env, policy):
-#         self.config = config
-#         self.env = env
-#         self.policy = policy
-#         self.compute = self.env.gpu
-#         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-#             else self.compute)
-
-#         self.task = None
-
-#     def set_task(self, task):
-#         self.task = task
-
-#     def init_weight(self, weight_home, path):
-#         v, h, dtype = (self.config.vocab_size, self.config.input_dim,
-#             self.config.dtype)
-#         path = os.path.join(path, "")
-#         weight_specs = [
-#             # w_ln
-#             ((h,), dtype, path + "norm.weight"),
-#             # lm_head.weight
-#             ((v, h), dtype, path + "lm_head.weight"),
-#             # ((v, h), dtype, path + "embed_tokens.weight"),
-#         ]
-#         weights = init_weight_list(weight_specs, self.policy, self.env)
-
-#         weight_home.store(weights)
-
-#     def load_weight(self, weight_home, weight_read_buf, k):
-#         w_ln, lm_head = weight_home.val
-#         if k == 0:
-#             dst1 = self.weight_load_dst
-#             dst2 = self.compute
-#             weight_read_buf.store((w_ln.smart_copy(dst2),
-#                 lm_head.smart_copy(dst1)))
-
-#     def init_cache_one_gpu_batch(self, cache_home):
-#         pass  # do nothing
-
-#     def load_cache(self, cache_home, cache_read_buf, i):
-#         pass  # do nothing
-
-#     def store_cache(self, cache_home, cache_write_buf, i):
-#         pass  # do nothing
-
-#     def input_act_shape_and_dtype(self, batch_size, seq_len):
-#         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
-
-#     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
-#                 cache_write_buf, i, k):
-#         donate = [False] * 4
-#         h, donate[0] = hidden.val, True
-
-#         if k == self.policy.num_gpu_batches - 1:
-#             # Clear the weight_read_buf if it is the last gpu batch
-#             (w_ln, donate[1]), (lm_head, donate[3]) = weight_read_buf.pop()
-#         else:
-#             (w_ln, _), (lm_head, _) = weight_read_buf.val
-
-#         h = self.compute.llama_output_embed(h, w_ln, donate,
-#             self.task.do_sample, self.task.temperature, lm_head, self.task.top_p)
-#         hidden.val = h
 
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
@@ -807,9 +281,10 @@ class LlamaDecoderLayer(nn.Module):
 
     def init_weight(self, weight_home, path):
         home1, home2 = ValueHolder(), ValueHolder()
-        self.self_attn.init_weight(home1, path)
-        self.mlp.init_weight(home2, path)
+        petals_attention_weights = self.self_attn.init_weight(home1, path)
+        petals_mlp_weights = self.mlp.init_weight(home2, path)
         weight_home.store((home1, home2))
+        return petals_attention_weights, petals_mlp_weights
 
     def load_weight(self, weight_home, weight_read_buf, k):
         read_buf1, read_buf2 = ValueHolder(), ValueHolder()
@@ -845,6 +320,18 @@ class LlamaDecoderLayer(nn.Module):
             k=k
         )
         self.mlp.forward(hidden, cache_read_buf=None, cache_write_buf=None, weight_read_buf=read_buf2, i=i, k=k, attention_mask=attention_mask)
+
+    def compute_layer(self, i, j, k):
+        # Update the hidden in place
+        # Clear the weight_read_buf if it is the last gpu batch
+        # Clear the cache_read_buf
+        # Run layer computation
+        if hasattr(self.hidden[i][j][k].val, 'data'):
+            self.hidden[i][j][k].val = self.hidden[i][j][k].val.data
+        
+        self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
+                               self.weight_read_buf[j], self.attention_mask[k],
+                               self.cache_write_buf[j][k], i, k)
 
 class LlamaLM:
     def __init__(self, config, env: ExecutionEnv, path: str, policy: Policy):
@@ -1012,7 +499,10 @@ class LlamaLM:
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
                 val.load_from_np(self.output_ids[left:right, pos - 1:pos])
         else:  # load from the last layer
-            val = self.hidden[i][j - 1][k].pop().move(dst)
+            val = self.hidden[i][j - 1][k].pop()
+            if hasattr(val, 'data'):
+                val = val.data
+            val = val.move(dst)
         self.hidden[i][j][k].store(val)
 
     def store_hidden(self, i, j, k):
@@ -1030,7 +520,10 @@ class LlamaLM:
         if j == self.num_layers - 1:  # store to output
             gpu_batch_size = self.policy.gpu_batch_size
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
-            ids = self.hidden[i][j][k].pop().data.detach().cpu().numpy()
+            hidden_val = self.hidden[i][j][k].pop()
+            if hasattr(hidden_val, 'data'):
+                hidden_val = hidden_val.data
+            ids = hidden_val.detach().cpu().numpy()
             pos = self.task.prompt_len + i
             if self.task.stop:
                 stopped = self.stopped[left:right]
@@ -1042,6 +535,8 @@ class LlamaLM:
         else:  # move to home
             x = self.hidden[i][j][k]
             if x.val:  # x may already be moved due to overlapping
+                if hasattr(x.val, 'data'):
+                    x.val = x.val.data
                 x.val = x.val.move(self.act_home)
 
     def compute_layer(self, i, j, k):
@@ -1049,6 +544,9 @@ class LlamaLM:
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
         # Run layer computation
+        if hasattr(self.hidden[i][j][k].val, 'data'):
+            self.hidden[i][j][k].val = self.hidden[i][j][k].val.data
+        
         self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
                                self.weight_read_buf[j], self.attention_mask[k],
                                self.cache_write_buf[j][k], i, k)
@@ -1473,7 +971,7 @@ def run_flexgen(args):
                     ## weight and cache compression
                     args.compress_weight,
                     CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=0, symmetric=False),
+                                      group_dim=1, symmetric=False),
                     args.compress_cache,
                     CompressionConfig(num_bits=4, group_size=64,
                                       group_dim=2, symmetric=False))
@@ -1597,3 +1095,337 @@ if __name__ == '__main__':
     assert len(args.percent) == 6
 
     run_flexgen(args)
+
+class FLEX_LlamaMLP(LlamaMLP):
+    def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
+        super().__init__(config)
+        self.config = config
+        self.env = env
+        self.layer_id = layer_id
+        self.policy = policy
+        self.compute = self.env.gpu
+        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight else self.compute)
+        self.task = None
+        self.temp_hidden_states = ValueHolder()
+
+    def set_task(self, task):
+        self.task = task
+
+    def init_weight(self, weight_home, path):
+        h, dtype = (self.config.hidden_size, np.float16)
+        i, dtype = (self.config.intermediate_size, np.float16)
+        path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
+        weight_specs = [
+            # 4 weight files
+            # gate_proj
+            ((i, h), dtype, path + "mlp.gate_proj.weight"),
+            # down_proj
+            ((h, i), dtype, path + "mlp.down_proj.weight"),
+            # up_proj
+            ((i, h), dtype, path + "mlp.up_proj.weight"),
+            # post attention layer norm
+            ((h, ), dtype, path + "post_attention_layernorm.weight"),
+        ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+        weight_home.store(weights)
+
+    def load_weight(self, weight_home, weight_read_buf, k):
+        gate, down, up, post_attention_layernorm = weight_home.val
+        if k == 0:
+            dst1 = self.weight_load_dst
+            dst2 = self.compute
+            weight_read_buf.store((
+                gate.smart_copy(dst1),
+                down.smart_copy(dst1),
+                up.smart_copy(dst1),
+                post_attention_layernorm.smart_copy(dst2)
+            ))
+
+    def init_cache_one_gpu_batch(self, cache_home):
+        pass  # do nothing
+
+    def load_cache(self, cache_home, cache_read_buf, i):
+        pass  # do nothing
+
+    def store_cache(self, cache_home, cache_write_buf, i):
+        pass  # do nothing
+
+    def forward(
+        self,
+        hidden_states,
+        cache_read_buf,
+        weight_read_buf,
+        attention_mask,
+        cache_write_buf,
+        position_ids,
+        k: int = 0
+        ):
+        donate = [False] * 9
+        h, donate[0] = hidden_states.val.data if hasattr(hidden_states.val, 'data') else hidden_states.val, True
+
+        if k == self.policy.num_gpu_batches - 1:
+            # Clear the weight_read_buf if it is the last gpu batch
+            ((gate, donate[1]), (down, donate[3]),
+             (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
+        else:
+            ((gate, _), (down, _),
+             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
+
+        # Access .data attribute if available for each weight tensor
+        gate = gate.data if hasattr(gate, 'data') else gate
+        down = down.data if hasattr(down, 'data') else down
+        up = up.data if hasattr(up, 'data') else up
+        post_attention_layernorm = post_attention_layernorm.data if hasattr(post_attention_layernorm, 'data') else post_attention_layernorm
+
+        # If the weights are compressed, decompress them
+        if hasattr(self.compute, 'compressed_device') and self.compute.compressed_device is not None:
+            gate = self.compute.compressed_device.decompress(gate)
+            down = self.compute.compressed_device.decompress(down)
+            up = self.compute.compressed_device.decompress(up)
+            post_attention_layernorm = self.compute.compressed_device.decompress(post_attention_layernorm)
+
+        h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
+        hidden_states.val = h
+        self.temp_hidden_states.val = h
+        
+        # Return a tuple containing only the hidden states tensor
+        return h
+
+class FLEX_LlamaAttention(LlamaAttention):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
+        super().__init__(config)
+        self.config = config
+        self.llama_config = get_llama_config('huggyllama/llama-7b')
+        self.num_heads = config.num_attention_heads
+        self.env = env
+        self.layer_id = layer_id
+        self.policy = policy
+        self.compute = self.env.gpu
+        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight else self.compute)
+        self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu)
+        self.task = None
+        self.temp_hidden_states = ValueHolder()
+
+    def set_task(self, task):
+        self.task = task
+
+    def init_weight(self, weight_home, path):
+        h, dtype = (self.config.hidden_size, np.float16)
+        path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
+        weight_specs = [
+            # 5 weight files
+            # w_q
+            ((h, h), dtype, path + "self_attn.q_proj.weight"),
+            # w_k
+            ((h, h), dtype, path + "self_attn.k_proj.weight"),
+            # w_v
+            ((h, h), dtype, path + "self_attn.v_proj.weight"),
+            # w_out
+            ((h, h), dtype, path + "self_attn.o_proj.weight"),
+            # input layer norm
+            ((h, ), dtype, path + "input_layernorm.weight"),
+            # rotary_embed
+            ((64, ), dtype, path + "self_attn.rotary_emb.inv_freq"),
+        ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+        weight_home.store(weights)
+
+    def load_weight(self, weight_home, weight_read_buf, k):
+        # In LlamaDecoderLayer, weight_home.val contains (home1, home2)
+        # We need to access the weights stored in home1
+        if isinstance(weight_home.val, tuple) and len(weight_home.val) == 2:
+            # This is the case when called from LlamaDecoderLayer
+            home1, _ = weight_home.val
+            # Check if home1 is a ValueHolder or a list
+            if hasattr(home1, 'val'):
+                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1.val
+            else:
+                # If home1 is a list, use it directly
+                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1
+        else:
+            # This is the case when called directly
+            w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_home.val
+            
+        if k == 0:
+            dst1 = self.weight_load_dst
+            dst2 = self.compute
+            weight_read_buf.store((
+                w_q.smart_copy(dst1),
+                w_k.smart_copy(dst1),
+                w_v.smart_copy(dst1),
+                w_out.smart_copy(dst1),
+                input_layernorm.smart_copy(dst2),
+                rotary_embed.smart_copy(dst2)
+            ))
+
+    def init_cache_one_gpu_batch(self, cache_home):
+        if self.task is None:
+            return
+        
+        shape = (self.task.prompt_len + self.task.gen_len,
+                self.policy.gpu_batch_size * self.llama_config.n_head,
+                self.config.hidden_size // self.llama_config.n_head)
+        k_cache = self.env.gpu.allocate(shape, np.float16)
+        v_cache = self.env.gpu.allocate(shape, np.float16)
+        cache_home.store((k_cache, v_cache))
+
+    def load_cache(self, cache_home, cache_read_buf, i):
+        if i == 0:  # prefill, no cache
+            return
+
+        k_home, v_home = cache_home.val
+
+        # Pick code path
+        if self.policy.compress_cache:
+            path = 0
+            dst = self.attention_compute.compressed_device
+        else:
+            if self.policy.cpu_cache_compute:
+                if (k_home.device.device_type == DeviceType.MIXED and
+                        k_home.data[0][0] is not None):
+                    path = 2
+                else:
+                    path = 1
+            else:
+                path = 0
+            dst = self.attention_compute
+
+        if path == 0:  # Direct copy
+            # shape: (s, b * n_head, head_dim)
+            indices = (slice(0, self.task.prompt_len + i),
+                       slice(0, k_home.shape[1]))
+
+            if self.policy.attn_sparsity >= 1.0:
+                cache_read_buf.store((
+                    k_home.smart_copy(dst, indices),
+                    v_home.smart_copy(dst, indices),
+                ))
+            else:
+                cache_read_buf.store((
+                    k_home.smart_copy(dst, indices),
+                    (v_home, False),
+                ))
+        elif path == 1:  # Copy to CPU temporary workspace
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1),
+                       slice(0, k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices,  compress_weight=self.policy.compress_weight )
+
+            if self.policy.attn_sparsity >= 1.0:
+                general_copy(v_buf, indices, v_home, indices,compress_weight=self.policy.compress_weight)
+                cache_read_buf.store(((k_buf, False), (v_buf, False)))
+            else:
+                cache_read_buf.store(((k_buf, False), ((v_home, v_buf), False)))
+        elif path == 2:  # Copy to both GPU and CPU
+            # The caches are stored on both GPU and other devices.
+            # Compute attention on gpu for caches stored on gpu.
+            # Compute attention on cpu for caches stored on cpu/disk.
+            gpu_k_buf = k_home.data[0][0]
+            gpu_v_buf = v_home.data[0][0]
+
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1),
+                       slice(gpu_k_buf.shape[1], k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices, self.policy.compress_weight)
+            general_copy(v_buf, indices, v_home, indices, self.policy.compress_weight)
+            cache_read_buf.store((((gpu_k_buf, k_buf,), False),
+                                  ((gpu_v_buf, v_buf,), False)))
+            assert self.policy.attn_sparsity >= 1.0
+        else:
+            raise ValueError(f"Invalid path: {path}")
+
+    def store_cache(self, cache_home, cache_write_buf, i):
+        # shape: (s, b * n_head, head_dim)
+        k_home, v_home = cache_home.val
+        k_new, v_new = cache_write_buf.pop()
+
+        if i == self.task.gen_len - 1:  # last token, no need to store cache
+            return
+
+        if i == 0:  # prefill
+            indices = (slice(0, k_new.shape[0]),
+                       slice(0, k_new.shape[1]))
+        else:  # decoding
+            pos = self.task.prompt_len + i
+            indices = (slice(pos - k_new.shape[0], pos),
+                       slice(0, k_new.shape[1]))
+
+        general_copy(k_home, indices, k_new, None, self.policy.compress_weight)
+        general_copy(v_home, indices, v_new, None, self.policy.compress_weight)
+
+    def forward(self, hidden, cache_read_buf=None, cache_write_buf=None, weight_read_buf=None, attention_mask=None, i=0, k=0):
+        print(f"[FLEX_LlamaAttention] Input hidden shape: {hidden.val.shape}")
+        print(f"[FLEX_LlamaAttention] Input hidden device: {hidden.val.device}")
+        print(f"[FLEX_LlamaAttention] Input hidden dtype: {hidden.val.dtype}")
+        hidden = hidden.val.data
+        # import pdb; pdb.set_trace()
+        print(f"[FLEX_LlamaAttention] Input hidden data: {hidden}")
+        # Get weight tensors
+        if weight_read_buf is None:
+            weight_read_buf = self.weight_read_buf
+        w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_read_buf.val
+        if isinstance(w_q, tuple):
+            w_q = w_q[0].data
+            w_k = w_k[0].data
+            w_v = w_v[0].data
+            w_out = w_out[0].data
+            input_layernorm = input_layernorm[0].data
+            rotary_embed = rotary_embed[0].data
+        # Ensure hidden states has the correct shape
+        if hidden.shape[-1] != self.config.hidden_size:
+            print(f"[FLEX_LlamaAttention] Shape mismatch: expected {self.config.hidden_size} but got {hidden.shape[-1]}")
+            # If the hidden size is half of expected, duplicate the data
+            if hidden.shape[-1] * 2 == self.config.hidden_size:
+                print("[FLEX_LlamaAttention] Duplicating data to match expected size")
+                hidden = torch.cat([hidden, hidden], dim=-1)
+            else:
+                raise ValueError(f"Hidden states dimension mismatch: expected {self.config.hidden_size} but got {hidden.shape[-1]}")
+
+        # Initialize donate list for memory management
+        donate = [False] * 14  # Create a list of 14 False values for donate flags
+
+        if i == 0:
+            # prefill
+            mask, donate[1] = attention_mask.val.data if hasattr(attention_mask.val, 'data') else attention_mask.val, True
+            h, new_k_cache, new_v_cache = self.compute.mha_llama(hidden, mask, w_q, w_k, w_v, w_out,
+                                       self.num_heads, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_embed, compress_weight=self.policy.compress_weight)
+            cache_write_buf.store((new_k_cache, new_v_cache))
+        else:
+            # decoding
+            mask, donate[1] = attention_mask.val.data if hasattr(attention_mask.val, 'data') else attention_mask.val, True
+            (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
+            
+            # Access .data attribute for cache tensors if available
+            k_cache = k_cache.data if hasattr(k_cache, 'data') else k_cache
+            v_cache = v_cache.data if hasattr(v_cache, 'data') else v_cache
+            
+            # Extract the actual tensors from the tuples if they are tuples
+            if isinstance(k_cache, tuple):
+                k_cache = k_cache[0]
+            if isinstance(v_cache, tuple):
+                v_cache = v_cache[0]
+                
+            # 确保缓存张量也是 NF4 格式
+            if hasattr(self.compute, 'compressed_device') and self.compute.compressed_device is not None:
+                # 检查张量是否有 compress 方法
+                if hasattr(k_cache, 'compress'):
+                    k_cache = k_cache.compress(self.policy.comp_cache_config)
+                if hasattr(v_cache, 'compress'):
+                    v_cache = v_cache.compress(self.policy.comp_cache_config)
+            
+            # If the weights are compressed, decompress them
+            
+            h, new_k_cache, new_v_cache = self.compute.mha_gen_llama(
+                hidden, mask, w_q,
+                w_k, w_v, w_out, self.num_heads,
+                k_cache, v_cache, donate, self.policy.attn_sparsity,
+                self.policy.compress_cache, self.policy.comp_cache_config,
+                input_layernorm,
+                rotary_embed, compress_weight=self.policy.compress_weight)
+            cache_write_buf.store((new_k_cache, new_v_cache))
+
+        hidden.val = h

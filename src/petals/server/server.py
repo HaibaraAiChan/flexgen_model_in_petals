@@ -43,7 +43,7 @@ from petals.utils.version import get_compatible_model_repo
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
+from petals.flexgen_utils.base import fix_recursive_import
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 from pynvml import *
 
@@ -207,7 +207,7 @@ class Server:
         if len(self.tensor_parallel_devices) > 1:
             logger.info(f"Model weights will be split between {', '.join(tensor_parallel_devices)}")
             check_device_balance(self.tensor_parallel_devices)
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         if quant_type is None:
             quant_type = QuantType.NF4 if device.type == "cuda" else QuantType.NONE
         self.quant_type = quant_type

@@ -8,7 +8,8 @@ import math
 import os
 from typing import Tuple, Union, Optional, Any, Sequence, List
 # fix recursive import
-from petals.flexgen_utils.pytorch_backend import TorchDevice, TorchDisk, TorchMixedDevice
+from petals.flexgen_utils.torch_device import TorchDevice, TorchDisk, TorchMixedDevice
+from petals.flexgen_utils.base import fix_recursive_import
 
 import numpy as np
 import torch
@@ -22,7 +23,6 @@ class ExecutionEnv:
 
     @classmethod
     def create(cls, offload_dir):
-        from petals.flexgen_utils.pytorch_backend import fix_recursive_import
         fix_recursive_import()  # Initialize TorchCompressedDevice
         gpu = TorchDevice("cuda:0")
         print('ExecutionEnv: gpu ', gpu)

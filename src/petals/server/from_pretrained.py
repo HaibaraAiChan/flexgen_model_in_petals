@@ -29,11 +29,12 @@ from petals.utils.auto_config import AutoDistributedConfig
 from petals.utils.disk_cache import DEFAULT_CACHE_DIR, allow_cache_reads, allow_cache_writes, free_disk_space_for
 from petals.utils.hf_auth import always_needs_auth
 
-from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
+from petals.flexgen_utils.base import fix_recursive_import
+from petals.flexgen_utils.torch_tensor import TorchTensor
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np
 # import pdb
@@ -89,6 +90,9 @@ def load_pretrained_block(
     for param_name, param in state_dict.items():
         if not str(param.dtype).startswith(("torch.uint", "torch.int", "torch.bool")):
             param = param.to(torch_dtype)
+        # 确保权重是张量而不是元组
+        if isinstance(param, tuple):
+            param = param[0]
         set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
     
     # # 使用 FlexGen 的权重加载方式
