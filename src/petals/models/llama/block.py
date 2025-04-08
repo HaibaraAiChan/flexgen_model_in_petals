@@ -20,34 +20,20 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
-
-
 import numpy as np
 from petals.utils.cuda_graphs import make_inference_graphed_callable
-# from petals.flexgen_utils.utils import ExecutionEnv
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor, TorchDevice
+from petals.flexgen_utils.torch_tensor import TorchTensor
+from petals.flexgen_utils.torch_device import TorchDevice
 from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
 from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer, DUMMY_WEIGHT
 from petals.flexgen_utils.llama_config import get_llama_config, download_llama_weights
 from petals.flexgen_utils.task import Task
 from transformers import AutoTokenizer
 import os
-# import sys
-# sys.path.insert(0,'..')
-# sys.path.insert(0,'/flexgen_model_in_petals/src/petals/')
-# from memory_usage import see_memory_usage, nvidia_smi_usage
 
-from petals.flexgen_utils.base import fix_recursive_import
-from petals.flexgen_utils.torch_tensor import TorchTensor
-from petals.flexgen_utils.torch_device import TorchDevice
-
-fix_recursive_import()
-
-# import torch
-# from pynvml.smi import nvidia_smi
 from pynvml import *
 
 def see_memory_usage(message, force=True):

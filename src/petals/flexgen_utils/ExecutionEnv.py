@@ -1,15 +1,12 @@
 import argparse
 import dataclasses
-from attr import define, field
-from attr.setters import frozen
-import functools
-import gc
-import math
-import os
-from typing import Tuple, Union, Optional, Any, Sequence, List
+
+
+from typing import  Any
 # fix recursive import
-from petals.flexgen_utils.torch_device import TorchDevice, TorchDisk, TorchMixedDevice
-from petals.flexgen_utils.base import fix_recursive_import
+from petals.flexgen_utils.torch_device import TorchDevice 
+from petals.flexgen_utils.torch_disk import TorchDisk
+from petals.flexgen_utils.torch_mixed_device import TorchMixedDevice
 
 import numpy as np
 import torch
@@ -23,7 +20,6 @@ class ExecutionEnv:
 
     @classmethod
     def create(cls, offload_dir):
-        fix_recursive_import()  # Initialize TorchCompressedDevice
         gpu = TorchDevice("cuda:0")
         print('ExecutionEnv: gpu ', gpu)
         cpu = TorchDevice("cpu")

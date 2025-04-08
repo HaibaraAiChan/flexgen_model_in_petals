@@ -43,7 +43,6 @@ from petals.utils.version import get_compatible_model_repo
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.base import fix_recursive_import
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 from pynvml import *
 
@@ -255,7 +254,6 @@ class Server:
 
         ##############################################################
         self.env = ExecutionEnv.create("~./flexgen_offload_dir") ##########
-        fix_recursive_import()  # Initialize TorchCompressedDevice
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
                     100, 0,              # w_gpu_percent: float, w_cpu_percent: float
                     0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float

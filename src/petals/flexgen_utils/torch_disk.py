@@ -9,6 +9,25 @@ import numpy as np
 from petals.flexgen_utils.torch_device import global_disk_device
 
 
+def copy_worker_func(queue, cuda_id):
+    """Worker function for copying tensors between devices."""
+    while True:
+        args = queue.get()
+        if args is None:
+            queue.task_done()
+            break
+        
+        src, dst, indices = args
+        try:
+            if indices is None:
+                dst.data[:] = src.data[:]
+            else:
+                dst.data[indices] = src.data[indices]
+        except Exception as e:
+            print(f"Error in copy_worker_func: {e}")
+        
+        queue.task_done()
+
 
 class TorchDisk:
     """Manage tensors stored on a disk."""
@@ -20,7 +39,7 @@ class TorchDisk:
 
         self.device_type = DeviceType.DISK
         # TorchCompressedDevice = compression.TorchCompressedDevice
-        seloscompressed_device = TorchCompressedDevice(self)
+        self.compressed_device = TorchCompressedDevice(self)
         print('TorchDisk, self.compressed_device ', self.compressed_device)
 
         if os.path.exists(self.path):

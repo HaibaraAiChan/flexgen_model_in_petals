@@ -6,9 +6,8 @@ import torch
 import numpy as np
 import os
 from itertools import count
-from typing import Optional, Union, Tuple
 
-from petals.flexgen_utils.base import torch_dtype_to_np_dtype
+from petals.flexgen_utils.shared_types import torch_dtype_to_np_dtype
 from petals.flexgen_utils.DeviceType import DeviceType
 
 class TorchTensor:

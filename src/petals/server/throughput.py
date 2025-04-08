@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import fcntl
 import json
 import math
@@ -21,9 +23,10 @@ from petals.utils.misc import DUMMY_KEY_PAST
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.base import fix_recursive_import
+
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 
+from petals.constants import DTYPE_MAP
 
 logger = get_logger(__name__)
 

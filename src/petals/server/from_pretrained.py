@@ -33,7 +33,7 @@ from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, dow
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.base import fix_recursive_import
+
 from petals.flexgen_utils.torch_tensor import TorchTensor
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np

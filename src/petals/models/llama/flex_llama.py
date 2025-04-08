@@ -14,8 +14,10 @@ import torch
 import torch.utils.checkpoint
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from petals.flexgen_utils.base import fix_recursive_import, DeviceType
-from petals.flexgen_utils.torch_device import TorchDevice, TorchDisk, TorchMixedDevice
+from petals.flexgen_utils.base import DeviceType
+from petals.flexgen_utils.torch_device import TorchDevice
+from petals.flexgen_utils.torch_disk import TorchDisk
+from petals.flexgen_utils.torch_mixed_device import TorchMixedDevice
 from petals.flexgen_utils.torch_tensor import TorchTensor
 from petals.flexgen_utils.task import Task
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
@@ -26,8 +28,6 @@ from torch import nn
 from transformers import AutoTokenizer
 from petals.flexgen_utils.timer import timers
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
-
-fix_recursive_import()
 
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,

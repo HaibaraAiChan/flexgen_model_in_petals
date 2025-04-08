@@ -3,13 +3,13 @@ import dataclasses
 import torch
 import numpy as np
 
-
-from petals.flexgen_utils.torch_tensor import TorchTensor
-from petals.flexgen_utils.torch_device import TorchDevice, global_cpu_device
+from petals.flexgen_utils.torch_device import TorchDevice
 from petals.flexgen_utils.DeviceType import DeviceType
-from petals.flexgen_utils.base import general_copy, fix_recursive_import
-from petals.flexgen_utils.utils import np_dtype_to_torch_dtype
+from petals.flexgen_utils.shared_types import np_dtype_to_torch_dtype
+from petals.flexgen_utils.compression_utils import get_compressed_indices
 
+# Import TorchTensor after defining the necessary types
+from petals.flexgen_utils.torch_tensor import TorchTensor
 
 @dataclasses.dataclass
 class CompressionConfig:
@@ -295,6 +295,7 @@ def general_copy_compressed(dst, dst_indices, src, src_indices):
     
     # 执行复制操作
     try:
+        from petals.flexgen_utils.base import general_copy
         general_copy(dst.data[0], dst_data_indices, src.data[0], src_data_indices)
         general_copy(dst.data[1], dst_scale_indices, src.data[1], src_scale_indices)
     except RuntimeError as e:
@@ -458,6 +459,5 @@ def test_real_compression():
 
 
 if __name__ == "__main__":
-    fix_recursive_import()
     #test_simulated_compression()
     test_real_compression()
