@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from petals.flexgen_utils.compression import CompressionConfig
+from petals.flexgen_utils.compression import CompressionConfig, TorchCompressedDevice
 from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from petals.flexgen_utils.base import DeviceType
 from petals.flexgen_utils.torch_device import TorchDevice
@@ -123,87 +123,55 @@ def get_choice(cur_percent, percents, choices):
     return choices[-1]
 
 def init_weight_list(weight_specs, policy, env):
-    
-    dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-    print('dev_percents :[ disk, cpu, gpu]', dev_percents)
-    dev_choices = [env.disk, env.cpu, env.gpu]
-
-    sizes = [np.prod(spec[0]) for spec in weight_specs]
-    sizes_cumsum = np.cumsum(sizes)
-    ret = []
-    petals_weights=[]
-    for i in range(len(weight_specs)):
-        mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
-        # print('mid_percent ', mid_percent)
-        home = get_choice(mid_percent * 100, dev_percents, dev_choices)
-        shape, dtype, filename = weight_specs[i]
-        # print('weight_specs[i] ', weight_specs[i][2])
-        if len(shape) < 2:
-            pin_memory = True
-            compress = False
-        else:
-            pin_memory = policy.pin_weight
-            compress = policy.compress_weight
-
-        if not compress:
-            weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-            # print('weight.shape', weight.shape)
-            # print('weight', weight)
-
-            if DUMMY_WEIGHT not in filename:
-                try:
-                    weight.load_from_np_file(weight_specs[i][2])
-                except (FileNotFoundError, AttributeError) as e:
-                    print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
-                    # 如果文件不存在或加载失败，使用随机初始化
-                    weight.load_from_np(np.random.rand(*shape).astype(dtype))
-            else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
-        else:
-            # 检查压缩设备是否可用
-            if hasattr(home, 'compressed_device') and home.compressed_device is not None:
-                # 使用原始形状，不进行调整
-                weight = home.compressed_device.allocate(
-                    shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
-
-                if DUMMY_WEIGHT not in filename:
-                    try:
-                        weight.load_from_np_file(weight_specs[i][2])
-                    except (FileNotFoundError, AttributeError) as e:
-                        print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
-                        # 如果文件不存在或加载失败，使用随机初始化
-                        for i in range(2):
-                            x = weight.data[i]
-                            x.load_from_np(np.random.rand(*x.shape).astype(torch_dtype_to_np_dtype[x.dtype]))
-                else:
-                    for i in range(2):
-                        x = weight.data[i]
-                        x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
-            else:
-                # 如果压缩设备不可用，回退到非压缩方式
-                print(f"Warning: Compressed device not available, falling back to non-compressed allocation")
-                weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-                if DUMMY_WEIGHT not in filename:
-                    try:
-                        weight.load_from_np_file(weight_specs[i][2])
-                    except (FileNotFoundError, AttributeError) as e:
-                        print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
-                        # 如果文件不存在或加载失败，使用随机初始化
-                        weight.load_from_np(np.random.rand(*shape).astype(dtype))
-                else:
-                    weight.load_from_np(np.ones(shape, dtype))
-        print('weight.data ', weight.data) # tuple: (data, scale, comp_config)
-        print('weight ', weight)
-        ret.append(weight)
-        petals_weights.append(weight.data)
+    """Initialize a list of weights from weight specifications."""
+    weights = []
+    for spec in weight_specs:
+        # Unpack the tuple directly
+        shape, dtype, path = spec
         
-    return ret, petals_weights
+        # Convert numpy dtype to torch dtype
+        if dtype == np.float16:
+            dtype = np_dtype_to_torch_dtype[dtype]
+        
+        # Create a weight tensor with the correct parameters
+        # Based on compression.py, the TorchTensor constructor is used like:
+        # TorchTensor(shape, dtype, data, device, name)
+        # We'll create an empty tensor as data and use the CPU device
+        # Convert shape to a tuple of integers if it's a tuple of tuples
+        if isinstance(shape, tuple) and len(shape) > 0 and isinstance(shape[0], tuple):
+            # If shape is a tuple of tuples, flatten it
+            shape = tuple(item for sublist in shape for item in sublist)
+        
+        # Create the tensor
+        empty_tensor = torch.empty(shape, dtype=dtype, pin_memory=policy.pin_weight, device=env.cpu.dev)
+        weight = TorchTensor(shape, dtype, empty_tensor, device=env.cpu, name=path)
+        
+        # Load the weight from the file
+        if path:
+            # Load the numpy array directly
+            np_array = np.load(path)
+            # Convert to torch tensor and copy to the device
+            torch_tensor = torch.from_numpy(np_array).to(env.cpu.dev)
+            
+            # Check if we need to compress to NF4
+            if policy.compress_weight and policy.comp_weight_config.compression_type == "nf4":
+                # Create a compressed device
+                compressed_device = TorchCompressedDevice(env.cpu)
+                # Compress the tensor to NF4
+                compressed_tensor = compressed_device.compress(torch_tensor, policy.comp_weight_config)
+                # Assign to the weight's data attribute
+                weight.data = compressed_tensor.data
+            else:
+                # Assign to the weight's data attribute without compression
+                weight.data = torch_tensor
+        
+        weights.append(weight)
+    return weights
 
 # 添加一个新函数，用于从 PyTorch 模型加载权重到 FlexGen 格式
 def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index):
     """
-    从 PyTorch 模型加载权重到 FlexGen 格式
+    从 PyTorch 模型加载权重到 FlexGen 格式，支持 NF4 压缩
     
     Args:
         model: PyTorch 模型
@@ -230,17 +198,28 @@ def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index
     try:
         # 初始化权重列表
         weights = init_weight_list(weight_specs, policy, env)
-        # print('weights ', weights)
         petals_weights = []
+        
         # 将权重加载到模型中
         for (name, _), weight in zip(model.named_parameters(), weights):
             param = getattr(model, name)
-            param.data = weight.data.to(param.device)
-            print('param', param)
+            
+            # 如果启用了权重压缩，需要先解压
+            if policy.compress_weight and policy.comp_weight_config.compression_type == "nf4":
+                # 创建压缩设备
+                compressed_device = TorchCompressedDevice(env.cpu)
+                # 解压权重
+                decompressed_tensor = compressed_device.decompress(weight.data, policy.comp_weight_config)
+                # 移动到正确的设备
+                param.data = decompressed_tensor.to(param.device)
+            else:
+                # 不压缩的情况，直接移动
+                param.data = weight.data.to(param.device)
+            
             petals_weights.append(param.data)
+        
         # 存储权重规格，以便后续使用
         weight_home[block_index] = weight_specs
-        print('petals_weights ', petals_weights)
         return petals_weights
     except Exception as e:
         print(f"Warning: Failed to initialize weights with FlexGen: {e}")
@@ -261,6 +240,11 @@ def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index
 
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
+        super().__init__()
+        self.config = config
+        self.env = env
+        self.policy = policy
+        self.layer_id = layer_id
         
         self.self_attn = FLEX_LlamaAttention(config=config, env=env, policy=policy, layer_id=layer_id)
         self.mlp = FLEX_LlamaMLP(
@@ -287,12 +271,9 @@ class LlamaDecoderLayer(nn.Module):
         return petals_attention_weights, petals_mlp_weights
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        read_buf1, read_buf2 = ValueHolder(), ValueHolder()
-        home1, home2 = weight_home.val
-        self.self_attn.load_weight(home1, read_buf1, k)
-        self.mlp.load_weight(home2, read_buf2, k)
-        if k == 0:
-           weight_read_buf.store((read_buf1, read_buf2))
+        read_buf1, read_buf2 = weight_home.val
+        self.self_attn.load_weight(read_buf1, weight_read_buf, k)
+        self.mlp.load_weight(read_buf2, weight_read_buf, k)
 
     def init_cache_one_gpu_batch(self, cache_home):
         self.self_attn.init_cache_one_gpu_batch(cache_home)
@@ -305,10 +286,10 @@ class LlamaDecoderLayer(nn.Module):
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
-        if k == self.policy.num_gpu_batches - 1:
-            read_buf1, read_buf2 = weight_read_buf.pop()
-        else:
-            read_buf1, read_buf2 = weight_read_buf.val
+        # 不再使用pop()操作，改为使用val属性访问权重
+        # 这样可以避免权重在计算过程中变为None
+        read_buf1, read_buf2 = weight_read_buf.val
+        
         # Self Attention
         self.self_attn.forward(
             hidden=hidden,
@@ -618,10 +599,22 @@ class LlamaLM:
         self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
         assert gpu_batch_size * num_gpu_batches == len(task.inputs)
 
-        # Intermediate tensors
-        # The following buffers store values used
-        # for the i-th token, j-th layer, k-th gpu batch.
-        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
+        # Initialize hidden states with debug logging
+        print(f"[LlamaLM] Initializing hidden states with dimensions: gen_len={gen_len}, num_layers={num_layers}, num_gpu_batches={num_gpu_batches}")
+        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
+        
+        # Verify initialization
+        for i in range(gen_len):
+            for j in range(num_layers):
+                for k in range(num_gpu_batches):
+                    if self.hidden[i][j][k] is None:
+                        print(f"[LlamaLM] Warning: Hidden state at i={i}, j={j}, k={k} is None")
+                    elif not hasattr(self.hidden[i][j][k], 'val'):
+                        print(f"[LlamaLM] Warning: Hidden state at i={i}, j={j}, k={k} has no val attribute")
+                    elif self.hidden[i][j][k].val is None:
+                        print(f"[LlamaLM] Warning: Hidden state value at i={i}, j={j}, k={k} is None")
+
+        # Clear cache and weight buffers
         for j in range(num_layers):
             for k in range(num_gpu_batches):
                 self.cache_home[j][k].clear()
@@ -631,7 +624,6 @@ class LlamaLM:
             self.weight_read_buf[j].clear()
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
-        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
 
         # Init cache
         self.set_task(task)
@@ -971,10 +963,10 @@ def run_flexgen(args):
                     ## weight and cache compression
                     args.compress_weight,
                     CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=1, symmetric=False),
+                                      group_dim=1, symmetric=False, compression_type="nf4"),
                     args.compress_cache,
                     CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=2, symmetric=False))
+                                      group_dim=2, symmetric=False, compression_type="nf4"))
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
     llama_config = get_llama_config(args.model)
     cache_size = llama_config.cache_bytes(num_prompts, prompt_len + gen_len)
@@ -1104,6 +1096,8 @@ class FLEX_LlamaMLP(LlamaMLP):
         self.layer_id = layer_id
         self.policy = policy
         self.compute = self.env.gpu
+        # Create a proper TorchCompressedDevice instance
+        self.compute.compressed_device = TorchCompressedDevice(self.compute)
         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight else self.compute)
         self.task = None
         self.temp_hidden_states = ValueHolder()
@@ -1112,6 +1106,7 @@ class FLEX_LlamaMLP(LlamaMLP):
         self.task = task
 
     def init_weight(self, weight_home, path):
+        # Use the correct hidden size from the config
         h, dtype = (self.config.hidden_size, np.float16)
         i, dtype = (self.config.intermediate_size, np.float16)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
@@ -1130,15 +1125,58 @@ class FLEX_LlamaMLP(LlamaMLP):
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        gate, down, up, post_attention_layernorm = weight_home.val
+        # In LlamaDecoderLayer, weight_home.val contains (home1, home2)
+        # We need to access the weights stored in home1
+        if isinstance(weight_home.val, tuple) and len(weight_home.val) == 2:
+            # This is the case when called from LlamaDecoderLayer
+            home1, _ = weight_home.val
+            # Check if home1 is a ValueHolder or a list
+            if hasattr(home1, 'val'):
+                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1.val
+            else:
+                # If home1 is a list, use it directly
+                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1
+        else:
+            # This is the case when called directly
+            w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_home.val
+        
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
+            
+            # 确保正确复制压缩的权重
+            # 对于压缩的权重，我们需要确保复制整个压缩结构
+            if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+                # 直接复制整个压缩结构
+                q_proj = w_q.copy(dst1)
+                k_proj = w_k.copy(dst1)
+                v_proj = w_v.copy(dst1)
+                o_proj = w_out.copy(dst1)
+                input_layernorm_copy = input_layernorm.copy(dst2)
+                rotary_embed_copy = rotary_embed.copy(dst2)
+                q_norm = input_layernorm.copy(dst2)
+                k_norm = input_layernorm.copy(dst2)
+            else:
+                # 使用 smart_copy 复制未压缩的权重
+                q_proj = w_q.smart_copy(dst1)
+                k_proj = w_k.smart_copy(dst1)
+                v_proj = w_v.smart_copy(dst1)
+                o_proj = w_out.smart_copy(dst1)
+                input_layernorm_copy = input_layernorm.smart_copy(dst2)
+                rotary_embed_copy = rotary_embed.smart_copy(dst2)
+                q_norm = input_layernorm.smart_copy(dst2)
+                k_norm = input_layernorm.smart_copy(dst2)
+            
+            # 存储复制后的权重
             weight_read_buf.store((
-                gate.smart_copy(dst1),
-                down.smart_copy(dst1),
-                up.smart_copy(dst1),
-                post_attention_layernorm.smart_copy(dst2)
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                input_layernorm_copy,
+                rotary_embed_copy,
+                q_norm,
+                k_norm
             ))
 
     def init_cache_one_gpu_batch(self, cache_home):
@@ -1150,46 +1188,42 @@ class FLEX_LlamaMLP(LlamaMLP):
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
-    def forward(
-        self,
-        hidden_states,
-        cache_read_buf,
-        weight_read_buf,
-        attention_mask,
-        cache_write_buf,
-        position_ids,
-        k: int = 0
-        ):
-        donate = [False] * 9
-        h, donate[0] = hidden_states.val.data if hasattr(hidden_states.val, 'data') else hidden_states.val, True
-
+    def forward(self, hidden, cache_read_buf, cache_write_buf, weight_read_buf, i, k, attention_mask):
+        # 获取权重
         if k == self.policy.num_gpu_batches - 1:
-            # Clear the weight_read_buf if it is the last gpu batch
-            ((gate, donate[1]), (down, donate[3]),
-             (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
+            ((gate, _), (down, _),
+             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
         else:
             ((gate, _), (down, _),
              (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
-
-        # Access .data attribute if available for each weight tensor
-        gate = gate.data if hasattr(gate, 'data') else gate
-        down = down.data if hasattr(down, 'data') else down
-        up = up.data if hasattr(up, 'data') else up
-        post_attention_layernorm = post_attention_layernorm.data if hasattr(post_attention_layernorm, 'data') else post_attention_layernorm
-
-        # If the weights are compressed, decompress them
-        if hasattr(self.compute, 'compressed_device') and self.compute.compressed_device is not None:
-            gate = self.compute.compressed_device.decompress(gate)
-            down = self.compute.compressed_device.decompress(down)
-            up = self.compute.compressed_device.decompress(up)
-            post_attention_layernorm = self.compute.compressed_device.decompress(post_attention_layernorm)
-
-        h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
-        hidden_states.val = h
-        self.temp_hidden_states.val = h
         
-        # Return a tuple containing only the hidden states tensor
-        return h
+        # 如果启用了权重压缩，需要先解压
+        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+            compressed_device = TorchCompressedDevice(self.compute)
+            gate = compressed_device.decompress(gate, self.policy.comp_weight_config)
+            down = compressed_device.decompress(down, self.policy.comp_weight_config)
+            up = compressed_device.decompress(up, self.policy.comp_weight_config)
+            post_attention_layernorm = compressed_device.decompress(post_attention_layernorm, self.policy.comp_weight_config)
+        
+        # 应用后注意力层归一化
+        hidden = post_attention_layernorm(hidden)
+        
+        # 应用门控和上投影
+        gate_output = gate(hidden)
+        up_output = up(hidden)
+        
+        # 应用激活函数和乘法
+        hidden = F.silu(gate_output) * up_output
+        
+        # 应用下投影
+        hidden = down(hidden)
+        
+        # 如果需要压缩输出
+        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+            compressed_device = TorchCompressedDevice(self.compute)
+            hidden = compressed_device.compress(hidden, self.policy.comp_weight_config)
+        
+        return hidden
 
 class FLEX_LlamaAttention(LlamaAttention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -1197,12 +1231,14 @@ class FLEX_LlamaAttention(LlamaAttention):
     def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
         super().__init__(config)
         self.config = config
-        self.llama_config = get_llama_config('huggyllama/llama-7b')
+        self.llama_config = config
         self.num_heads = config.num_attention_heads
         self.env = env
         self.layer_id = layer_id
         self.policy = policy
         self.compute = self.env.gpu
+        # Create a proper TorchCompressedDevice instance
+        self.compute.compressed_device = TorchCompressedDevice(self.compute)
         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight else self.compute)
         self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu)
         self.task = None
@@ -1251,22 +1287,50 @@ class FLEX_LlamaAttention(LlamaAttention):
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
+            
+            # 确保正确复制压缩的权重
+            # 对于压缩的权重，我们需要确保复制整个压缩结构
+            if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+                # 直接复制整个压缩结构
+                q_proj = w_q.copy(dst1)
+                k_proj = w_k.copy(dst1)
+                v_proj = w_v.copy(dst1)
+                o_proj = w_out.copy(dst1)
+                input_layernorm_copy = input_layernorm.copy(dst2)
+                rotary_embed_copy = rotary_embed.copy(dst2)
+                q_norm = input_layernorm.copy(dst2)
+                k_norm = input_layernorm.copy(dst2)
+            else:
+                # 使用 smart_copy 复制未压缩的权重
+                q_proj = w_q.smart_copy(dst1)
+                k_proj = w_k.smart_copy(dst1)
+                v_proj = w_v.smart_copy(dst1)
+                o_proj = w_out.smart_copy(dst1)
+                input_layernorm_copy = input_layernorm.smart_copy(dst2)
+                rotary_embed_copy = rotary_embed.smart_copy(dst2)
+                q_norm = input_layernorm.smart_copy(dst2)
+                k_norm = input_layernorm.smart_copy(dst2)
+            
+            # 存储复制后的权重
             weight_read_buf.store((
-                w_q.smart_copy(dst1),
-                w_k.smart_copy(dst1),
-                w_v.smart_copy(dst1),
-                w_out.smart_copy(dst1),
-                input_layernorm.smart_copy(dst2),
-                rotary_embed.smart_copy(dst2)
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                input_layernorm_copy,
+                rotary_embed_copy,
+                q_norm,
+                k_norm
             ))
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.task is None:
             return
         
+        # Use the correct hidden size from the config
         shape = (self.task.prompt_len + self.task.gen_len,
-                self.policy.gpu_batch_size * self.llama_config.n_head,
-                self.config.hidden_size // self.llama_config.n_head)
+                self.policy.gpu_batch_size * self.llama_config.num_attention_heads,
+                self.config.hidden_size // self.llama_config.num_attention_heads)
         k_cache = self.env.gpu.allocate(shape, np.float16)
         v_cache = self.env.gpu.allocate(shape, np.float16)
         cache_home.store((k_cache, v_cache))
@@ -1357,75 +1421,104 @@ class FLEX_LlamaAttention(LlamaAttention):
         general_copy(k_home, indices, k_new, None, self.policy.compress_weight)
         general_copy(v_home, indices, v_new, None, self.policy.compress_weight)
 
-    def forward(self, hidden, cache_read_buf=None, cache_write_buf=None, weight_read_buf=None, attention_mask=None, i=0, k=0):
-        print(f"[FLEX_LlamaAttention] Input hidden shape: {hidden.val.shape}")
-        print(f"[FLEX_LlamaAttention] Input hidden device: {hidden.val.device}")
-        print(f"[FLEX_LlamaAttention] Input hidden dtype: {hidden.val.dtype}")
-        hidden = hidden.val.data
-        # import pdb; pdb.set_trace()
-        print(f"[FLEX_LlamaAttention] Input hidden data: {hidden}")
-        # Get weight tensors
-        if weight_read_buf is None:
-            weight_read_buf = self.weight_read_buf
-        w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_read_buf.val
-        if isinstance(w_q, tuple):
-            w_q = w_q[0].data
-            w_k = w_k[0].data
-            w_v = w_v[0].data
-            w_out = w_out[0].data
-            input_layernorm = input_layernorm[0].data
-            rotary_embed = rotary_embed[0].data
-        # Ensure hidden states has the correct shape
-        if hidden.shape[-1] != self.config.hidden_size:
-            print(f"[FLEX_LlamaAttention] Shape mismatch: expected {self.config.hidden_size} but got {hidden.shape[-1]}")
-            # If the hidden size is half of expected, duplicate the data
-            if hidden.shape[-1] * 2 == self.config.hidden_size:
-                print("[FLEX_LlamaAttention] Duplicating data to match expected size")
-                hidden = torch.cat([hidden, hidden], dim=-1)
-            else:
-                raise ValueError(f"Hidden states dimension mismatch: expected {self.config.hidden_size} but got {hidden.shape[-1]}")
-
-        # Initialize donate list for memory management
-        donate = [False] * 14  # Create a list of 14 False values for donate flags
-
-        if i == 0:
-            # prefill
-            mask, donate[1] = attention_mask.val.data if hasattr(attention_mask.val, 'data') else attention_mask.val, True
-            h, new_k_cache, new_v_cache = self.compute.mha_llama(hidden, mask, w_q, w_k, w_v, w_out,
-                                       self.num_heads, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_embed, compress_weight=self.policy.compress_weight)
-            cache_write_buf.store((new_k_cache, new_v_cache))
+    def forward(self, hidden, cache_read_buf, cache_write_buf, weight_read_buf, i, k, attention_mask):
+        # 获取权重
+        if k == self.policy.num_gpu_batches - 1:
+            ((q_proj, _), (k_proj, _),
+             (v_proj, _), (o_proj, _),
+             (input_layernorm, _), (rotary_emb, _),
+             (q_norm, _), (k_norm, _)) = weight_read_buf.val
         else:
-            # decoding
-            mask, donate[1] = attention_mask.val.data if hasattr(attention_mask.val, 'data') else attention_mask.val, True
-            (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
-            
-            # Access .data attribute for cache tensors if available
-            k_cache = k_cache.data if hasattr(k_cache, 'data') else k_cache
-            v_cache = v_cache.data if hasattr(v_cache, 'data') else v_cache
-            
-            # Extract the actual tensors from the tuples if they are tuples
-            if isinstance(k_cache, tuple):
-                k_cache = k_cache[0]
-            if isinstance(v_cache, tuple):
-                v_cache = v_cache[0]
-                
-            # 确保缓存张量也是 NF4 格式
-            if hasattr(self.compute, 'compressed_device') and self.compute.compressed_device is not None:
-                # 检查张量是否有 compress 方法
-                if hasattr(k_cache, 'compress'):
-                    k_cache = k_cache.compress(self.policy.comp_cache_config)
-                if hasattr(v_cache, 'compress'):
-                    v_cache = v_cache.compress(self.policy.comp_cache_config)
-            
-            # If the weights are compressed, decompress them
-            
-            h, new_k_cache, new_v_cache = self.compute.mha_gen_llama(
-                hidden, mask, w_q,
-                w_k, w_v, w_out, self.num_heads,
-                k_cache, v_cache, donate, self.policy.attn_sparsity,
-                self.policy.compress_cache, self.policy.comp_cache_config,
-                input_layernorm,
-                rotary_embed, compress_weight=self.policy.compress_weight)
-            cache_write_buf.store((new_k_cache, new_v_cache))
+            ((q_proj, _), (k_proj, _),
+             (v_proj, _), (o_proj, _),
+             (input_layernorm, _), (rotary_emb, _),
+             (q_norm, _), (k_norm, _)) = weight_read_buf.val
+        
+        # 如果启用了权重压缩，需要先解压
+        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+            compressed_device = TorchCompressedDevice(self.compute)
+            q_proj = compressed_device.decompress(q_proj, self.policy.comp_weight_config)
+            k_proj = compressed_device.decompress(k_proj, self.policy.comp_weight_config)
+            v_proj = compressed_device.decompress(v_proj, self.policy.comp_weight_config)
+            o_proj = compressed_device.decompress(o_proj, self.policy.comp_weight_config)
+            input_layernorm = compressed_device.decompress(input_layernorm, self.policy.comp_weight_config)
+            q_norm = compressed_device.decompress(q_norm, self.policy.comp_weight_config)
+            k_norm = compressed_device.decompress(k_norm, self.policy.comp_weight_config)
+            rotary_emb = compressed_device.decompress(rotary_emb, self.policy.comp_weight_config)
+        
+        # 应用 q_norm 和 k_norm
+        q = q_norm(hidden)
+        k = k_norm(hidden)
+        
+        # 应用投影
+        q = q_proj(q)
+        k = k_proj(k)
+        v = v_proj(hidden)
+        
+        # 应用旋转嵌入
+        q = rotary_emb(q)
+        k = rotary_emb(k)
+        
+        # 处理缓存
+        if cache_read_buf is not None and cache_read_buf.val is not None:
+            k_cache, v_cache = cache_read_buf.val
+            if self.policy.compress_cache and self.policy.comp_cache_config.compression_type == "nf4":
+                compressed_device = TorchCompressedDevice(self.compute)
+                k_cache = compressed_device.decompress(k_cache, self.policy.comp_cache_config)
+                v_cache = compressed_device.decompress(v_cache, self.policy.comp_cache_config)
+        
+        # 计算注意力
+        attn_output = self.attention(q, k, v, attention_mask)
+        
+        # 应用输出投影
+        attn_output = o_proj(attn_output)
+        
+        # 如果需要压缩输出
+        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
+            compressed_device = TorchCompressedDevice(self.compute)
+            attn_output = compressed_device.compress(attn_output, self.policy.comp_weight_config)
+        
+        return attn_output
 
-        hidden.val = h
+    def attention(self, q, k, v, attention_mask):
+        # Handle compressed tensors
+        if self.policy.compress_weight:
+            # Decompress tensors if they are compressed
+            q = q.decompress() if hasattr(q, 'decompress') else q
+            k = k.decompress() if hasattr(k, 'decompress') else k
+            v = v.decompress() if hasattr(v, 'decompress') else v
+        
+        # Get dimensions
+        batch_size, seq_length, hidden_size = q.shape
+        head_dim = hidden_size // self.num_heads
+        
+        # Reshape query, key, value for multi-head attention
+        q = q.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        
+        # Scale query
+        q = q / math.sqrt(head_dim)
+        
+        # Compute attention scores
+        attn_weights = torch.matmul(q, k.transpose(-2, -1))
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        
+        # Apply softmax
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        
+        # Reshape output
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_length, hidden_size)
+        
+        # Handle compression for output if needed
+        if self.policy.compress_weight:
+            attn_output = attn_output.compress(self.policy.comp_weight_config) if hasattr(attn_output, 'compress') else attn_output
+        
+        return attn_output

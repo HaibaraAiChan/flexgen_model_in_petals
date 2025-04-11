@@ -18,14 +18,16 @@
             "num_bits":4,  
             "group_size":64,  
             "group_dim":0,  
-            "symmetric": false 
+            "symmetric": false,
+            "compression_type": "nf4"
         },  
         "compress_cache": false,  
         "comp_cache_config": {  
             "num_bits":4,  
             "group_size":64,  
             "group_dim":2,  
-            "symmetric": false 
+            "symmetric": false,
+            "compression_type": "nf4"
         }  
     }  
 }

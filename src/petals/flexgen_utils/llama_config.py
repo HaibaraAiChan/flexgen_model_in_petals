@@ -21,7 +21,7 @@ class LlamaConfig:
     input_dim: int=4096
     intermediate_size: int=11008
     num_hidden_layers: int=32
-    n_head: int=32
+    num_attention_heads: int=32
     hidden_act: str="silu"
     max_position_embeddings: int=2048
     initializer_range: float=0.02
@@ -29,6 +29,10 @@ class LlamaConfig:
     pad_token_id: int=0
     tie_word_embeddings: bool=False
     dtype: type=np.float16
+
+    @property
+    def n_head(self) -> int:
+        return self.num_attention_heads
 
     def model_bytes(self):
         V = self.vocab_size
@@ -52,13 +56,13 @@ def get_llama_config(name, **kwargs):
     arch_name = name
 
     if arch_name == "llama-7b":
-        config = LlamaConfig(name=name, input_dim=4096, n_head=32, num_hidden_layers=32, intermediate_size=11008)
+        config = LlamaConfig(name=name, input_dim=4096, num_attention_heads=32, num_hidden_layers=32, intermediate_size=11008)
     elif arch_name == "llama-13b":
-        config = LlamaConfig(name=name, input_dim=5120, n_head=40, num_hidden_layers=40, intermediate_size=13824)
+        config = LlamaConfig(name=name, input_dim=5120, num_attention_heads=40, num_hidden_layers=40, intermediate_size=13824)
     elif arch_name == "llama-30b":
-        config = LlamaConfig(name=name, input_dim=6656, n_head=52, num_hidden_layers=60, intermediate_size=17920)
+        config = LlamaConfig(name=name, input_dim=6656, num_attention_heads=52, num_hidden_layers=60, intermediate_size=17920)
     elif arch_name == "llama-65b":
-        config = LlamaConfig(name=name, input_dim=8192, n_head=64, num_hidden_layers=80, intermediate_size=22016)
+        config = LlamaConfig(name=name, input_dim=8192, num_attention_heads=64, num_hidden_layers=80, intermediate_size=22016)
     else:
         raise ValueError(f"Invalid model name: {name}")
     

@@ -134,7 +134,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
             # 如果是torch.Tensor，转换为ValueHolder
             # Get the device string from the torch.device object
             device_str = str(hidden_states.device)
-            tensor_data = TorchTensor(shape=hidden_states.shape, data=hidden_states, dtype=hidden_states.dtype, device=TorchDevice(device_str))
+            tensor_data = TorchTensor(shape=hidden_states.shape, dtype=hidden_states.dtype, data=hidden_states, device=TorchDevice(device_str))
             hidden_holder = ValueHolder()
             hidden_holder.store(tensor_data)
             hidden_states = hidden_holder
@@ -158,33 +158,28 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
             # 如果提供了cache_write_buf，我们需要在内部处理它
             # 这里我们可以在调用父类的forward方法后，将结果存储到cache_write_buf中
             result = super(OptimizedLlamaAttention, self).forward(
-                hidden=hidden_states,
-                cache_read_buf=cache_read_buf,
-                weight_read_buf=weight_read_buf,
-                attention_mask=attention_mask,
-                i=i,
-                k=k
+                hidden_states,
+                cache_read_buf,
+                cache_write_buf,  # 确保传递cache_write_buf
+                weight_read_buf,
+                i,
+                k,
+                attention_mask
             )
-            # 假设result是一个元组，其中第二个元素是cache_write_buf需要的数据
-            if isinstance(result, tuple) and len(result) > 1:
-                cache_write_buf.store(result[1])
-            return result
         else:
-            # 如果没有提供cache_write_buf，直接调用父类的forward方法
             result = super(OptimizedLlamaAttention, self).forward(
-                hidden=hidden_states,
-                cache_read_buf=cache_read_buf,
-                weight_read_buf=weight_read_buf,
-                attention_mask=attention_mask,
-                i=i,
-                k=k
+                hidden_states,
+                cache_read_buf,
+                None,  # 如果没有提供cache_write_buf，则传递None
+                weight_read_buf,
+                i,
+                k,
+                attention_mask
             )
-            # 更新temp_hidden_states
-            if isinstance(result, tuple):
-                self.temp_hidden_states.val = result[0]
-            else:
-                self.temp_hidden_states.val = result
-            return self.temp_hidden_states.val, None, None
+        # 更新temp_hidden_states
+        if isinstance(result, tuple) and len(result) > 1:
+            cache_write_buf.store(result[1])
+        return result
 
 
 class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py return config.block_class(config)
@@ -386,7 +381,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # 将hidden_states转换为ValueHolder类型
         # Get the device string from the torch.device object
         device_str = str(hidden_states.device)
-        tensor_data = TorchTensor(shape=hidden_states.shape, data=hidden_states, dtype=hidden_states.dtype, device=TorchDevice(device_str))
+        tensor_data = TorchTensor(shape=hidden_states.shape, dtype=hidden_states.dtype, data=hidden_states, device=TorchDevice(device_str))
         hidden_holder = ValueHolder()
         hidden_holder.store(tensor_data)
         
@@ -438,7 +433,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
 
         data = hidden_states
         device = TorchDevice(data.device)
-        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=device)
+        tensor_data = TorchTensor(shape=data.shape, dtype=data.dtype, data=data, device=device)
         self.hidden[0][0][0].store(tensor_data)
         
         self.task = task
@@ -714,7 +709,7 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         # 将hidden_states转换为ValueHolder类型
         # Get the device string from the torch.device object
         device_str = str(hidden_states.device)
-        tensor_data = TorchTensor(shape=hidden_states.shape, data=hidden_states, dtype=hidden_states.dtype, device=TorchDevice(device_str))
+        tensor_data = TorchTensor(shape=hidden_states.shape, dtype=hidden_states.dtype, data=hidden_states, device=TorchDevice(device_str))
         hidden_holder = ValueHolder()
         hidden_holder.store(tensor_data)
         

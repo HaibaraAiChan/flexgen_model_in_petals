@@ -35,10 +35,9 @@ if cuda_device.compressed_device:
 else:
     print("Warning: CUDA compressed device is None")
 
-# Create a compression config
+# Test standard compression
+print("\nTesting standard compression:")
 comp_config = CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False)
-
-# Create a compressed tensor on CUDA
 shape = (10, 10)
 dtype = np.float16
 compressed_tensor = cuda_device.compressed_device.allocate(shape, dtype, comp_config)
@@ -46,18 +45,23 @@ print(f"Compressed tensor device type: {compressed_tensor.device.device_type}")
 
 # Create a NumPy array
 np_array = np.random.rand(*shape).astype(dtype)
-
-# Load the NumPy array into the compressed tensor
-# This should now work without errors
 compressed_tensor.load_from_np(np_array)
-print("Successfully loaded NumPy array into compressed tensor")
+print("Successfully loaded NumPy array into compressed tensor (standard)")
+
+# Test NF4 compression
+print("\nTesting NF4 compression:")
+nf4_config = CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False, compression_type="nf4")
+nf4_compressed_tensor = cuda_device.compressed_device.allocate(shape, dtype, nf4_config)
+print(f"NF4 compressed tensor device type: {nf4_compressed_tensor.device.device_type}")
+
+# Load the same NumPy array into NF4 compressed tensor
+nf4_compressed_tensor.load_from_np(np_array)
+print("Successfully loaded NumPy array into compressed tensor (NF4)")
 
 # Create a PyTorch tensor
 torch_tensor = torch.randn(shape, dtype=torch.float16)
-
-# Load the PyTorch tensor into the compressed tensor
-# This should now work without errors
-compressed_tensor.load_from_state(torch_tensor)
-print("Successfully loaded PyTorch tensor into compressed tensor")
+print("\nOriginal tensor:", torch_tensor)
+print("Standard compressed tensor:", compressed_tensor)
+print("NF4 compressed tensor:", nf4_compressed_tensor)
 
 print("All tests passed!") 

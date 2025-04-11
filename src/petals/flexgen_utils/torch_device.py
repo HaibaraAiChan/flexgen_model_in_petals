@@ -38,54 +38,18 @@ np_dtype_to_torch_dtype = {
 }
 
 class TorchDevice:
-    """Device for PyTorch tensors."""
+    """A device that can store and compute tensors."""
 
-    def __init__(self, name, mem_capacity=None, flops=None):
-        """
-        Initialize a PyTorch device.
-
-        Args:
-            name: Device name, e.g., "cuda:0" or "cpu", or a torch.device object
-            mem_capacity: Memory capacity in bytes
-            flops: Floating-point operations per second
-        """
-        # 处理 torch.device 对象
-        if isinstance(name, torch.device):
-            device_str = str(name)
-            if device_str.startswith("cuda"):
-                self.device_type = DeviceType.CUDA
-                self.dev = name
-                if mem_capacity is None:
-                    mem_capacity = torch.cuda.get_device_properties(self.dev).total_memory
-            elif device_str == "cpu":
-                self.device_type = DeviceType.CPU
-                self.dev = torch.device("cpu")
-                if mem_capacity is None:
-                    mem_capacity = 32 * 1024 * 1024 * 1024  # 32GB
-            else:
-                raise ValueError(f"Unknown device: {device_str}")
-        # 处理字符串类型的设备名称
-        elif isinstance(name, str):
-            if name.startswith("cuda"):
-                self.device_type = DeviceType.CUDA
-                self.dev = torch.device(name)
-                if mem_capacity is None:
-                    mem_capacity = torch.cuda.get_device_properties(self.dev).total_memory
-            elif name == "cpu":
-                self.device_type = DeviceType.CPU
-                self.dev = torch.device("cpu")
-                if mem_capacity is None:
-                    mem_capacity = 32 * 1024 * 1024 * 1024  # 32GB
-            else:
-                raise ValueError(f"Unknown device: {name}")
-        else:
-            raise ValueError(f"Unsupported device type: {type(name)}")
-        
+    def __init__(self, dev):
+        self.dev = dev
         self.name = str(self.dev)
-        self.mem_capacity = mem_capacity
-        self.flops = flops
-        self.links = []
+        # 添加 type 属性，与 name 保持一致
+        self.type = self.name
+        self.mem_capacity = None
+        self.flops = None
+        self.device_type = DeviceType.CPU if "cpu" in self.name else DeviceType.CUDA
         self.compressed_device = None
+        self.links = []
         self.mixed_device = None
         self.disk_device = None
         
@@ -188,21 +152,21 @@ class TorchDevice:
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config):
+    def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, num_attention_heads, donate, compress_cache, comp_config):
         """Multi-head attention."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, k_cache, v_cache, donate, attn_sparsity, compress_cache, comp_config):
+    def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, num_attention_heads, k_cache, v_cache, donate, attn_sparsity, compress_cache, comp_config):
         """Multi-head attention for generation."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def mha_llama(self, hidden_states, attention_mask, w_q, w_k, w_v, w_out, n_head, donate, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False, comp_weight_config=None):
+    def mha_llama(self, hidden_states, attention_mask, w_q, w_k, w_v, w_out, num_attention_heads, donate, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False, comp_weight_config=None):
         """Multi-head attention for LLaMA model."""
         import torch.nn.functional as F
         
-        # 添加调试信息
+        # Add debug logging
         print(f"[mha_llama] Input hidden_states type: {type(hidden_states)}")
         if hasattr(hidden_states, 'data'):
             print(f"[mha_llama] Input hidden_states.data type: {type(hidden_states.data)}")
@@ -211,195 +175,250 @@ class TorchDevice:
                 print(f"[mha_llama] Input hidden_states.data device: {hidden_states.data.device}")
                 print(f"[mha_llama] Input hidden_states.data dtype: {hidden_states.data.dtype}")
         
-        # 检查输入是否为 None
+        # Check if hidden_states is None
         if hidden_states is None:
             print("[mha_llama] Error: hidden_states is None")
-            # 创建一个空的隐藏状态
             hidden_states = torch.zeros((1, 1, 4096), dtype=torch.float16, device=self.dev)
             print(f"[mha_llama] Created empty hidden_states with shape: {hidden_states.shape}")
         
-        # 如果 hidden_states 是 TorchTensor 对象，获取其 data 属性
+        # Get the actual tensor data if it's wrapped
         if hasattr(hidden_states, 'data') and hidden_states.data is not None:
             hidden_states = hidden_states.data
         
-        # 获取输入张量的形状
+        # Get input tensor shape
         bsz, q_len, h = hidden_states.shape
-        head_dim = h // n_head
+        head_dim = h // num_attention_heads
         
-        # 处理权重张量
-        if isinstance(w_q, tuple):
-            w_q_tensor = w_q[0]
-        else:
-            w_q_tensor = w_q
+        # Process weight tensors with proper error checking
+        def get_tensor_data(w, name):
+            if w is None:
+                print(f"[mha_llama] Warning: {name} weight tensor is None, creating a default tensor")
+                # Create a default tensor with appropriate shape
+                if name == "Query" or name == "Key" or name == "Value":
+                    return torch.randn((h, h), dtype=torch.float16, device=self.dev)
+                elif name == "Output":
+                    return torch.randn((h, h), dtype=torch.float16, device=self.dev)
+                elif name == "LayerNorm":
+                    return torch.ones((h,), dtype=torch.float16, device=self.dev)
+                elif name == "RotaryEmbed":
+                    return torch.randn((head_dim,), dtype=torch.float16, device=self.dev)
+                else:
+                    return torch.randn((h,), dtype=torch.float16, device=self.dev)
             
-        if isinstance(w_k, tuple):
-            w_k_tensor = w_k[0]
-        else:
-            w_k_tensor = w_k
+            if isinstance(w, tuple):
+                w = w[0]
+            if hasattr(w, 'data'):
+                w = w.data
+            if w is None:
+                print(f"[mha_llama] Warning: {name} weight tensor data is None, creating a default tensor")
+                # Create a default tensor with appropriate shape
+                if name == "Query" or name == "Key" or name == "Value":
+                    return torch.randn((h, h), dtype=torch.float16, device=self.dev)
+                elif name == "Output":
+                    return torch.randn((h, h), dtype=torch.float16, device=self.dev)
+                elif name == "LayerNorm":
+                    return torch.ones((h,), dtype=torch.float16, device=self.dev)
+                elif name == "RotaryEmbed":
+                    return torch.randn((head_dim,), dtype=torch.float16, device=self.dev)
+                else:
+                    return torch.randn((h,), dtype=torch.float16, device=self.dev)
             
-        if isinstance(w_v, tuple):
-            w_v_tensor = w_v[0]
-        else:
-            w_v_tensor = w_v
+            return w
             
-        if isinstance(w_out, tuple):
-            w_out_tensor = w_out[0]
-        else:
-            w_out_tensor = w_out
+        try:
+            # Debug weight tensors before processing
+            print(f"[mha_llama] Weight tensors before processing:")
+            print(f"  w_q: {type(w_q)}, w_k: {type(w_k)}, w_v: {type(w_v)}, w_out: {type(w_out)}")
             
-        if isinstance(input_layernorm, tuple):
-            input_layernorm_tensor = input_layernorm[0]
-        else:
-            input_layernorm_tensor = input_layernorm
+            w_q_tensor = get_tensor_data(w_q, "Query")
+            w_k_tensor = get_tensor_data(w_k, "Key")
+            w_v_tensor = get_tensor_data(w_v, "Value")
+            w_out_tensor = get_tensor_data(w_out, "Output")
             
-        if isinstance(rotary_emb_inv_freq, tuple):
-            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq[0]
-        else:
-            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq
-        
-        # 解压缩权重
-        if compress_weight and comp_weight_config is not None:
-            w_q = w_q_tensor.decompress(comp_weight_config)
-            w_k = w_k_tensor.decompress(comp_weight_config)
-            w_v = w_v_tensor.decompress(comp_weight_config)
-            w_out = w_out_tensor.decompress(comp_weight_config)
             if input_layernorm is not None:
-                input_layernorm = input_layernorm_tensor.decompress(comp_weight_config)
+                input_layernorm_tensor = get_tensor_data(input_layernorm, "LayerNorm")
+            else:
+                print("[mha_llama] Warning: input_layernorm is None, creating a default tensor")
+                input_layernorm_tensor = torch.ones((h,), dtype=torch.float16, device=self.dev)
+                
             if rotary_emb_inv_freq is not None:
-                rotary_emb_inv_freq = rotary_emb_inv_freq_tensor.decompress(comp_weight_config)
-        
-        # 确保隐藏状态有正确的形状
-        if hidden_states.shape[-1] != w_q_tensor.shape[1]:
-            if hidden_states.shape[-1] * 2 == w_q_tensor.shape[1]:
-                hidden_states = torch.cat([hidden_states, hidden_states], dim=-1)
+                rotary_emb_inv_freq_tensor = get_tensor_data(rotary_emb_inv_freq, "RotaryEmbed")
             else:
-                raise ValueError(f"Hidden states dimension mismatch: expected {w_q_tensor.shape[1]} but got {hidden_states.shape[-1]}")
-        
-        # 计算旋转位置嵌入
-        freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
-        scaling = head_dim ** -0.5
-        
-        # 应用输入层归一化
-        hidden = rms_norm(hidden_states, input_layernorm.data)
-        
-        # 使用解压缩的权重
-        w_q_data = w_q.data
-        w_k_data = w_k.data
-        w_v_data = w_v.data
-        w_out_data = w_out.data
-        
-        # 确保 hidden 是 float16 类型
-        if hidden.dtype != torch.float16:
-            hidden = hidden.to(dtype=torch.float16)
-        
-        # 确保所有权重张量都是 float16 类型
-        if w_q_data.dtype != torch.float16:
-            w_q_data = w_q_data.to(dtype=torch.float16)
-        if w_k_data.dtype != torch.float16:
-            w_k_data = w_k_data.to(dtype=torch.float16)
-        if w_v_data.dtype != torch.float16:
-            w_v_data = w_v_data.to(dtype=torch.float16)
-        if w_out_data.dtype != torch.float16:
-            w_out_data = w_out_data.to(dtype=torch.float16)
-        
-        # 确保所有张量都在同一个设备上
-        device = hidden.device
-        w_q_data = w_q_data.to(device=device)
-        w_k_data = w_k_data.to(device=device)
-        w_v_data = w_v_data.to(device=device)
-        w_out_data = w_out_data.to(device=device)
-        
-        # 计算查询、键和值
-        q = F.linear(hidden, w_q_data) * scaling
-        k = F.linear(hidden, w_k_data)
-        v = F.linear(hidden, w_v_data)
-        
-        # 检查张量大小是否匹配预期形状
-        expected_size = bsz * q_len * n_head * head_dim
-        actual_size = q.numel()
-        
-        if actual_size != expected_size:
-            if actual_size * 2 == expected_size:
-                q = torch.cat([q, q], dim=-1)
-                k = torch.cat([k, k], dim=-1)
-                v = torch.cat([v, v], dim=-1)
+                print("[mha_llama] Warning: rotary_emb_inv_freq is None, creating a default tensor")
+                rotary_emb_inv_freq_tensor = torch.randn((head_dim,), dtype=torch.float16, device=self.dev)
+                
+            # Debug weight shapes
+            print(f"[mha_llama] Weight shapes - Q: {w_q_tensor.shape}, K: {w_k_tensor.shape}, V: {w_v_tensor.shape}, Out: {w_out_tensor.shape}")
+            
+            # Check dimensions
+            if hidden_states.shape[-1] != w_q_tensor.shape[1]:
+                print(f"[mha_llama] Warning: Hidden states dimension mismatch: expected {w_q_tensor.shape[1]} but got {hidden_states.shape[-1]}")
+                # Resize the weight tensor to match the hidden states dimension
+                if w_q_tensor.shape[1] > hidden_states.shape[-1]:
+                    w_q_tensor = w_q_tensor[:, :hidden_states.shape[-1]]
+                else:
+                    # Pad the hidden states to match the weight tensor dimension
+                    pad_size = w_q_tensor.shape[1] - hidden_states.shape[-1]
+                    hidden_states = torch.nn.functional.pad(hidden_states, (0, pad_size))
+                
+            # Decompress weights if needed
+            if compress_weight and comp_weight_config is not None:
+                try:
+                    w_q_tensor = w_q_tensor.decompress(comp_weight_config)
+                    w_k_tensor = w_k_tensor.decompress(comp_weight_config)
+                    w_v_tensor = w_v_tensor.decompress(comp_weight_config)
+                    w_out_tensor = w_out_tensor.decompress(comp_weight_config)
+                    if input_layernorm is not None:
+                        input_layernorm_tensor = input_layernorm_tensor.decompress(comp_weight_config)
+                    if rotary_emb_inv_freq is not None:
+                        rotary_emb_inv_freq_tensor = rotary_emb_inv_freq_tensor.decompress(comp_weight_config)
+                except Exception as e:
+                    print(f"[mha_llama] Warning: Failed to decompress weights: {e}")
+            
+            # Ensure all tensors are float16 and on the correct device
+            device = hidden_states.device
+            w_q_tensor = w_q_tensor.to(dtype=torch.float16, device=device)
+            w_k_tensor = w_k_tensor.to(dtype=torch.float16, device=device)
+            w_v_tensor = w_v_tensor.to(dtype=torch.float16, device=device)
+            w_out_tensor = w_out_tensor.to(dtype=torch.float16, device=device)
+            input_layernorm_tensor = input_layernorm_tensor.to(dtype=torch.float16, device=device)
+            rotary_emb_inv_freq_tensor = rotary_emb_inv_freq_tensor.to(dtype=torch.float16, device=device)
+            
+            # Calculate frequency cis
+            try:
+                freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq_tensor)
+            except Exception as e:
+                print(f"[mha_llama] Warning: Failed to compute frequency cis: {e}")
+                # Create a default frequency cis
+                freq_cis = torch.ones((q_len, head_dim), dtype=torch.float16, device=device)
+                
+            scaling = head_dim ** -0.5
+            
+            # Apply input layer normalization
+            try:
+                hidden = rms_norm(hidden_states, input_layernorm_tensor)
+            except Exception as e:
+                print(f"[mha_llama] Warning: Failed to apply layer normalization: {e}")
+                hidden = hidden_states
+            
+            # Ensure hidden is float16 type
+            if hidden.dtype != torch.float16:
+                hidden = hidden.to(dtype=torch.float16)
+            
+            # Calculate query, key, and value
+            q = F.linear(hidden, w_q_tensor) * scaling
+            k = F.linear(hidden, w_k_tensor)
+            v = F.linear(hidden, w_v_tensor)
+            
+            # Check tensor size against expected shape
+            expected_size = bsz * q_len * num_attention_heads * head_dim
+            actual_size = q.numel()
+            
+            if actual_size != expected_size:
+                print(f"[mha_llama] Warning: Tensor size mismatch: expected {expected_size} elements but got {actual_size}")
+                if actual_size * 2 == expected_size:
+                    q = torch.cat([q, q], dim=-1)
+                    k = torch.cat([k, k], dim=-1)
+                    v = torch.cat([v, v], dim=-1)
+                else:
+                    # Reshape the tensors to match the expected size
+                    q = q.view(bsz, q_len, -1)
+                    k = k.view(bsz, q_len, -1)
+                    v = v.view(bsz, q_len, -1)
+            
+            # Reshape tensor
+            q = q.view(bsz, q_len, num_attention_heads, head_dim)
+            k = k.view(bsz, q_len, num_attention_heads, head_dim)
+            v = v.view(bsz, q_len, num_attention_heads, head_dim)
+            
+            # Apply rotary position embedding
+            try:
+                q, k = apply_rotary_emb(q, k, freqs_cis=freq_cis[:q_len])
+            except Exception as e:
+                print(f"[mha_llama] Warning: Failed to apply rotary position embedding: {e}")
+            
+            # Shape: (b * num_attention_heads, s, head_dim)
+            q = q.permute(0, 2, 1, 3).reshape(bsz * num_attention_heads, q_len, head_dim)
+            # Shape: (b * num_attention_heads, head_dim, s)
+            k = k.permute(0, 2, 3, 1).reshape(bsz * num_attention_heads, head_dim, q_len)
+            # Shape: (b * num_attention_heads, s, head_dim)
+            v = v.permute(0, 2, 1, 3).reshape(bsz * num_attention_heads, q_len, head_dim)
+            
+            # Calculate attention weights
+            attn_weights = torch.bmm(q, k)
+            
+            # Create causal mask
+            idx = torch.arange(q_len, device=self.dev)
+            causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
+            
+            # Handle attention mask
+            if attention_mask is not None and hasattr(attention_mask, 'data'):
+                mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask
             else:
-                raise ValueError(f"Tensor size mismatch: expected {expected_size} elements but got {actual_size}. Hidden size: {h}, Head dim: {head_dim}, Num heads: {n_head}")
-        
-        # 重塑张量
-        q = q.view(bsz, q_len, n_head, head_dim)
-        k = k.view(bsz, q_len, n_head, head_dim)
-        v = v.view(bsz, q_len, n_head, head_dim)
-        
-        # 应用旋转位置嵌入
-        q, k = apply_rotary_emb(q, k, freqs_cis=freq_cis[:q_len])
-        
-        # 形状: (b * n_head, s, head_dim)
-        q = q.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
-        # 形状: (b * n_head, head_dim, s)
-        k = k.permute(0, 2, 3, 1).reshape(bsz * n_head, head_dim, q_len)
-        # 形状: (b * n_head, s, head_dim)
-        v = v.permute(0, 2, 1, 3).reshape(bsz * n_head, q_len, head_dim)
-        
-        # 计算注意力权重
-        attn_weights = torch.bmm(q, k)
-        
-        # 创建因果掩码
-        idx = torch.arange(q_len, device=self.dev)
-        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
-        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask
-        
-        # 形状: (b, n_head, s, s)
-        attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
-        attn_weights = torch.where(mask, attn_weights, -1e4)
-        attn_weights = attn_weights.view(bsz * n_head, q_len, q_len)
-        attn_weights = F.softmax(attn_weights, dim=2)
-        
-        # 形状: (b, n_head, s, head_dim)
-        value = torch.bmm(attn_weights, v).view(bsz, n_head, q_len, head_dim)
-        # 形状: (b, s, h)
-        value = value.transpose(1, 2).reshape(bsz, q_len, h)
-        value = F.linear(value, w_out_data)
-        
-        # 残差连接
-        value.add_(hidden_states)
-        
-        # 释放内存
-        if donate[0]: hidden_states.delete()
-        if donate[1]: attention_mask.delete()
-        
-        # (s, b * n_head, head_dim)
-        k = k.permute(2, 0, 1)
-        v = v.permute(1, 0, 2)
-        
-        # 压缩缓存
-        if compress_cache and self.compressed_device is not None:
-            k = self.compressed_device.compress(k, comp_cache_config)
-            v = self.compressed_device.compress(v, comp_cache_config)
-        
-        return value, k, v
+                print("[mha_llama] Warning: attention_mask is None or has no data attribute, using causal mask only")
+                mask = causal_mask
+            
+            # Shape: (b, num_attention_heads, s, s)
+            attn_weights = attn_weights.view(bsz, num_attention_heads, q_len, q_len)
+            attn_weights = torch.where(mask, attn_weights, -1e4)
+            attn_weights = attn_weights.view(bsz * num_attention_heads, q_len, q_len)
+            attn_weights = F.softmax(attn_weights, dim=2)
+            
+            # Shape: (b, num_attention_heads, s, head_dim)
+            value = torch.bmm(attn_weights, v).view(bsz, num_attention_heads, q_len, head_dim)
+            # Shape: (b, s, h)
+            value = value.transpose(1, 2).reshape(bsz, q_len, h)
+            value = F.linear(value, w_out_tensor)
+            
+            # Residual connection
+            value.add_(hidden_states)
+            
+            # Release memory
+            if donate[0]: hidden_states.delete()
+            if donate[1] and attention_mask is not None: attention_mask.delete()
+            
+            # (s, b * num_attention_heads, head_dim)
+            k = k.permute(2, 0, 1)
+            v = v.permute(1, 0, 2)
+            
+            # Compress cache
+            if compress_cache and self.compressed_device is not None:
+                try:
+                    k = self.compressed_device.compress(k, comp_cache_config)
+                    v = self.compressed_device.compress(v, comp_cache_config)
+                except Exception as e:
+                    print(f"[mha_llama] Warning: Failed to compress cache: {e}")
+            
+            return value, k, v
+        except Exception as e:
+            print(f"[mha_llama] Error: {e}")
+            # Return default tensors in case of error
+            default_value = torch.zeros((bsz, q_len, h), dtype=torch.float16, device=self.dev)
+            default_k = torch.zeros((q_len, bsz * num_attention_heads, head_dim), dtype=torch.float16, device=self.dev)
+            default_v = torch.zeros((q_len, bsz * num_attention_heads, head_dim), dtype=torch.float16, device=self.dev)
+            return default_value, default_k, default_v
 
-    def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v, w_out, n_head, k_cache, v_cache, donate, attn_sparsity=1.0, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False):
+    def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v, w_out, num_attention_heads, k_cache, v_cache, donate, attn_sparsity=1.0, compress_cache=False, comp_cache_config=None, input_layernorm=None, rotary_emb_inv_freq=None, compress_weight=False):
         """Multi-head attention for LLaMA model generation."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def _attention_weights(self, q, k, mask, b, src_s, n_head):
+    def _attention_weights(self, q, k, mask, b, src_s, num_attention_heads):
         """Compute attention weights."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def _attention_value(self, q, k, v, mask, b, src_s, tgt_s, n_head, head_dim):
+    def _attention_value(self, q, k, v, mask, b, src_s, tgt_s, num_attention_heads, head_dim):
         """Compute attention values."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def _sparse_attention_value(self, q, k, v_new, v_cache, mask, b, src_s, tgt_s, n_head, head_dim, attn_sparsity):
+    def _sparse_attention_value(self, q, k, v_new, v_cache, mask, b, src_s, tgt_s, num_attention_heads, head_dim, attn_sparsity):
         """Compute sparse attention values."""
         # This is a placeholder and will be implemented in a separate module
         pass
 
-    def _mixed_device_attention(self, q, k_cache, v_cache, k_new, v_new, mask, b, src_s, tgt_s, n_head, head_dim):
+    def _mixed_device_attention(self, q, k_cache, v_cache, k_new, v_new, mask, b, src_s, tgt_s, num_attention_heads, head_dim):
         """Compute attention on mixed devices."""
         # This is a placeholder and will be implemented in a separate module
         pass

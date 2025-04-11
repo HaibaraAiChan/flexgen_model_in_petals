@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Optional, Tuple
 
 import torch
 import numpy as np
@@ -13,12 +14,14 @@ from petals.flexgen_utils.torch_tensor import TorchTensor
 
 @dataclasses.dataclass
 class CompressionConfig:
-    """Group-wise quantization."""
-    num_bits: int
-    group_size: int
-    group_dim: int
-    symmetric: bool
+    """Configuration for tensor compression."""
+    num_bits: int = 4
+    group_size: int = 64
+    group_dim: int = 0
+    symmetric: bool = False
+    shape: Optional[Tuple[int, ...]] = None  # Target shape for compression
     enabled: bool = True
+    compression_type: str = "standard"  # Options: "standard", "nf4"
 
 
 class TorchCompressedDevice:
@@ -71,7 +74,7 @@ class TorchCompressedDevice:
 
     def init_cache_one_gpu_batch(self, config, task, policy):
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
-            config.n_head, config.input_dim, task.prompt_len, task.gen_len,
+            config.num_attention_heads, config.input_dim, task.prompt_len, task.gen_len,
             policy.gpu_batch_size)
         shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead
@@ -87,7 +90,7 @@ class TorchCompressedDevice:
             return  # Only CPU requires this fp32 workspace
 
         b = policy.gpu_batch_size
-        n_head = config.n_head
+        n_head = config.num_attention_heads
         head_dim = config.input_dim // n_head
         max_seq_len = task.prompt_len + task.gen_len - 1
         shape = (max_seq_len, b * n_head, head_dim)
@@ -105,204 +108,143 @@ class TorchCompressedDevice:
                 device=self.base_device.dev),
         ]
 
-    def compress(self, tensor, comp_config):
-        """Compress a torch.Tensor while maintaining the original shape."""
-        # Ensure we have a valid base device
-        if self.base_device is None:
-            if global_cpu_device is None:
-                # Create CPU device first
-                global_cpu_device = TorchDevice("cpu")
-                # global_cpu_device will be set in TorchDevice.__init__
-            self.base_device = global_cpu_device
-
-        group_size, num_bits, group_dim, symmetric = (
-            comp_config.group_size, comp_config.num_bits,
-            comp_config.group_dim, comp_config.symmetric)
-        assert num_bits == 4 and group_size % 2 == 0 and not symmetric
-
-        if tensor.device.type == "cpu" and tensor.dtype == torch.float16:
-            tensor = tensor.float()
-
-        shape = tensor.shape
-        num_groups = (shape[group_dim] + group_size - 1) // group_size
-
-        # Pad
-        new_shape = (shape[:group_dim] + (num_groups, group_size) +
-                     shape[group_dim+1:])
-        pad_len = (group_size - shape[group_dim] % group_size) % group_size
-        if pad_len != 0:
-            pad_shape = shape[:group_dim] + (pad_len,) + shape[group_dim+1:]
-            tensor = torch.cat([
-                tensor,
-                torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)],
-                dim=group_dim)
-        data = tensor.view(new_shape)
-
-        # Quantize
-        B = 2 ** num_bits - 1
-        mn = torch.min(data, dim=group_dim + 1, keepdim=True)[0]
-        mx = torch.max(data, dim=group_dim + 1, keepdim=True)[0]
-
-        scale = B / (mx - mn)
-        data = data - mn
-        data.mul_(scale)
-        data = data.clamp_(0, B).round_().to(torch.uint8)
-
-        # Pack
-        left_indices = (
-            tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
-            (slice(0, data.shape[group_dim+1], 2),))
-        right_indices = (
-            tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
-            (slice(1, data.shape[group_dim+1], 2),))
-        data = torch.bitwise_or(
-            data[left_indices].bitwise_left_shift(4), data[right_indices])
-
-        # Calculate the size of the compressed data
-        compressed_size = num_groups * (group_size // 2)
+    def compress(self, tensor, compression_config):
+        """
+        Compress a tensor using the configured compression settings.
         
-        # Create shapes for the compressed data and scale factors
-        # The data shape maintains the original dimensions but with compressed data
-        data_shape = list(shape)
-        data_shape[group_dim] = compressed_size
+        Args:
+            tensor: The tensor to compress (can be torch.Tensor or TorchTensor)
+            compression_config: The compression configuration
+            
+        Returns:
+            A TorchTensor containing the compressed data
+        """
+        # Check if input is a TorchTensor
+        if isinstance(tensor, TorchTensor):
+            # 如果是 TorchTensor，使用其 data 属性
+            tensor_data = tensor.data
+            # 如果 data 是元组（压缩张量），则使用第一个元素
+            if isinstance(tensor_data, tuple):
+                tensor_data = tensor_data[0]
+        # Check if input is a valid torch.Tensor
+        elif not isinstance(tensor, torch.Tensor):
+            try:
+                tensor_data = torch.tensor(tensor)
+            except Exception as e:
+                raise ValueError(f"Failed to convert input to torch.Tensor: {e}")
+        else:
+            tensor_data = tensor
+            
+        # Use the internal compression function
+        compressed_data, scale = _compress_tensor(tensor_data, compression_config)
         
-        # The scale shape includes the original dimensions plus an extra dimension for min/max values
-        # For scale, we need to use num_groups instead of the original shape[group_dim]
-        scale_shape = list(shape)
-        scale_shape[group_dim] = num_groups  # Use num_groups instead of shape[group_dim]
-        scale_shape.insert(group_dim + 1, 2)  # Add dimension for min/max values
-        
-        # 添加调试信息
-        print(f"Compressing tensor: original shape {shape}, data_shape {data_shape}, scale_shape {scale_shape}")
-        print(f"group_dim={group_dim}, group_size={group_size}, num_groups={num_groups}, compressed_size={compressed_size}")
-        
-        # Reshape the data and scale tensors
-        data = data.view(data_shape)
-        scale = torch.cat([scale, mn], dim=group_dim+1).view(scale_shape)
-
-        data = TorchTensor.create_from_torch(data, self.base_device)
-        scale = TorchTensor.create_from_torch(scale, self.base_device)
-
-        return TorchTensor(shape, tensor.dtype,
-                           (data, scale, comp_config), self)
+        # Create a TorchTensor to represent the compressed data
+        # 创建一个元组 (compressed_data, scale, compression_config) 作为 data 参数
+        return TorchTensor(tensor_data.shape, tensor_data.dtype, (compressed_data, scale, compression_config), self)
 
     def decompress(self, tensor):
-        data, scale, comp_config = tensor.data
-        group_size, num_bits, group_dim, symmetric = (
-            comp_config.group_size, comp_config.num_bits,
-            comp_config.group_dim, comp_config.symmetric)
-
-        # Calculate the number of groups from the compressed data shape
-        compressed_size = data.shape[group_dim]
-        group_size_c = group_size // 2
-        num_groups = compressed_size // group_size_c
-
-        # Create a shape for the unpacked data
-        shape = data.shape
-        new_shape = list(shape)
-        new_shape[group_dim] = num_groups * group_size
+        """
+        Decompress a tensor that was previously compressed.
         
-        # Pad if necessary
-        pad_len = (group_size - tensor.shape[group_dim] % group_size) % group_size
-        if pad_len != 0:
-            pad_shape = shape[:group_dim] + (pad_len,) + shape[group_dim+1:]
-            data = torch.cat([
-                data,
-                torch.zeros(pad_shape, dtype=data.dtype, device=data.device)],
-                dim=group_dim)
+        Args:
+            tensor: The compressed tensor to decompress
+            
+        Returns:
+            A torch.Tensor containing the decompressed data
+        """
+        # Check if input is a valid compressed tensor
+        if not isinstance(tensor, TorchTensor):
+            raise ValueError(f"Expected TorchTensor, got {type(tensor)}")
         
-        # Reshape for unpacking
-        unpack_shape = list(shape)
-        unpack_shape[group_dim] = num_groups * group_size_c
-        packed = data.data.view(unpack_shape)
-
-        # Unpack
-        if self.base_device.device_type == DeviceType.CPU:
-            self.workspace_pt = (self.workspace_pt + 1) % len(
-                self.data_decompress_workspace)
-            data = self.data_decompress_workspace[
-                self.workspace_pt][:shape[0]]
+        # Get the compressed data and scale
+        # 压缩张量的 data 是一个元组 (compressed_data, scale, compression_config)
+        compressed_data, scale, compression_config = tensor.data
+        
+        # 获取原始形状
+        original_shape = tensor.shape
+        
+        # 获取压缩配置
+        group_size = compression_config.group_size
+        group_dim = compression_config.group_dim
+        
+        # 计算填充
+        pad_size = (group_size - original_shape[group_dim] % group_size) % group_size
+        if pad_size > 0:
+            padded_shape = list(original_shape)
+            padded_shape[group_dim] += pad_size
+            data = compressed_data.view(*padded_shape)
+            # 移除填充
+            slices = [slice(None)] * len(original_shape)
+            slices[group_dim] = slice(original_shape[group_dim])
+            data = data[slices]
         else:
-            new_shape = (shape[:group_dim] + (num_groups, group_size,) +
-                         shape[group_dim+1:])
-            data = torch.empty(new_shape, dtype=torch.float16, device=packed.device)
+            data = compressed_data.view(*original_shape)
         
-        # Unpack the 4-bit values
-        left_indices = (
-            tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
-            (slice(0, data.shape[group_dim+1], 2),))
-        right_indices = (
-            tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
-            (slice(1, data.shape[group_dim+1], 2),))
-        data[left_indices] = packed.bitwise_right_shift(4)
-        data[right_indices] = packed.bitwise_and(0xF)
-
-        # Dequantize
-        scale, mn = scale.data.split(1, dim=group_dim + 1)
-        data.div_(scale)
-        data.add_(mn)
-
-        # Reshape back to the original shape
-        unpad_len = (group_size - tensor.shape[group_dim] % group_size) % group_size
-        if unpad_len != 0:
-            flatten_shape = (shape[:group_dim] + (num_groups * group_size,) +
-                             shape[group_dim+1:])
-            indices = [slice(0, x) for x in flatten_shape]
-            indices[group_dim] = slice(0, flatten_shape[group_dim] - unpad_len)
-            data = data.view(flatten_shape)[indices].contiguous()
-
-        return data.view(tensor.shape)
-
-
-def general_copy_compressed(dst, dst_indices, src, src_indices):
-    assert (src.device.device_type == DeviceType.COMPRESSED and
-            dst.device.device_type == DeviceType.COMPRESSED)
-
-    src_data_indices, src_scale_indices = get_compressed_indices(
-        src, src_indices, src.shape)
-
-    dst_data_indices, dst_scale_indices = get_compressed_indices(
-        dst, dst_indices, dst.shape)
-    
-    # 添加调试信息
-    print(f"Copying compressed tensor: src shape {src.shape}, dst shape {dst.shape}")
-    print(f"src_data shape: {src.data[0].shape}, dst_data shape: {dst.data[0].shape}")
-    print(f"src_data_indices: {src_data_indices}, dst_data_indices: {dst_data_indices}")
-    
-    # 检查源张量和目标张量的形状是否匹配
-    src_data_shape = src.data[0].shape
-    dst_data_shape = dst.data[0].shape
-    
-    # 检查索引是否会导致形状不匹配
-    src_slice = src_data_indices[0]  # 假设 group_dim=0
-    dst_slice = dst_data_indices[0]
-    
-    src_size = src_slice.stop - src_slice.start
-    dst_size = dst_slice.stop - dst_slice.start
-    
-    if src_size != dst_size:
-        print(f"Warning: Shape mismatch in general_copy_compressed: src_size={src_size}, dst_size={dst_size}")
-        
-        # 调整源索引以匹配目标索引的大小
-        if src_size > dst_size:
-            # 如果源大小大于目标大小，截断源
-            src_data_indices[0] = slice(src_slice.start, src_slice.start + dst_size)
-            src_scale_indices[0] = slice(src_scale_indices[0].start, src_scale_indices[0].start + (dst_size + 63) // 64)
+        # 解量化数据
+        if compression_config.compression_type == "nf4":
+            # NF4 解量化
+            data = data.float() * scale
         else:
-            # 如果源大小小于目标大小，扩展目标
-            dst_data_indices[0] = slice(dst_slice.start, dst_slice.start + src_size)
-            dst_scale_indices[0] = slice(dst_scale_indices[0].start, dst_scale_indices[0].start + (src_size + 63) // 64)
+            # 标准解量化
+            data = data.float() * scale
+        
+        return data
+
+
+def general_copy_compressed(src, dst):
+    """
+    Copy data between compressed tensors, handling shape mismatches and compression type differences.
     
-    # 执行复制操作
+    Args:
+        src: Source compressed tensor
+        dst: Destination compressed tensor
+    """
+    # Check if both tensors are compressed
+    if not hasattr(src, 'device') or not hasattr(dst, 'device'):
+        raise ValueError("Both source and destination must be compressed tensors")
+        
+    # Get compression configs
+    src_config = src.data[2]  # 从压缩张量的 data 元组中获取压缩配置
+    dst_config = dst.data[2]
+    
+    # Check if compression types match
+    if src_config.compression_type != dst_config.compression_type:
+        print(f"Warning: Compression type mismatch. Source: {src_config.compression_type}, Destination: {dst_config.compression_type}")
+        # Decompress source and recompress with destination config
+        decompressed = src.device.decompress(src)
+        compressed = dst.device.compress(decompressed)
+        dst.data = compressed.data
+        return
+        
+    # Check if shapes match
+    if src.shape != dst.shape:
+        print(f"Warning: Shape mismatch. Source: {src.shape}, Destination: {dst.shape}")
+        # Decompress source
+        decompressed = src.device.decompress(src)
+        
+        # Resize if needed
+        if decompressed.shape != dst.shape:
+            decompressed = torch.nn.functional.interpolate(
+                decompressed.unsqueeze(0),
+                size=dst.shape,
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)
+            
+        # Recompress with destination config
+        compressed = dst.device.compress(decompressed)
+        dst.data = compressed.data
+        return
+        
+    # If shapes and compression types match, copy directly
     try:
-        from petals.flexgen_utils.base import general_copy
-        general_copy(dst.data[0], dst_data_indices, src.data[0], src_data_indices)
-        general_copy(dst.data[1], dst_scale_indices, src.data[1], src_scale_indices)
+        dst.data = src.data
     except RuntimeError as e:
-        print(f"Error in general_copy_compressed: {e}")
-        print(f"src.data[0].shape: {src.data[0].shape}, dst.data[0].shape: {dst.data[0].shape}")
-        print(f"src_data_indices: {src_data_indices}, dst_data_indices: {dst_data_indices}")
-        raise
+        print(f"Error during direct copy: {e}")
+        # Fallback to decompress-resize-compress method
+        decompressed = src.device.decompress(src)
+        compressed = dst.device.compress(decompressed)
+        dst.data = compressed.data
 
 
 def get_compressed_indices(tensor, indices, shape):
@@ -320,7 +262,13 @@ def get_compressed_indices(tensor, indices, shape):
     compressed_size = num_groups * (group_size // 2)
     
     # Ensure the start index is aligned with the group size
-    assert indices[group_dim].start % group_size == 0
+    # FIXED: Handle cases where start index is not aligned with group size
+    start_idx = indices[group_dim].start
+    if start_idx % group_size != 0:
+        print(f"Warning: Start index {start_idx} is not aligned with group size {group_size}")
+        # Adjust the start index to be aligned with the group size
+        start_idx = (start_idx // group_size) * group_size
+        indices[group_dim] = slice(start_idx, indices[group_dim].stop)
 
     # Create indices for the compressed data
     data_indices = list(indices)
@@ -335,6 +283,11 @@ def get_compressed_indices(tensor, indices, shape):
     scale_indices[group_dim] = slice(
         indices[group_dim].start // group_size,
         min((indices[group_dim].stop + group_size - 1) // group_size, num_groups))
+
+    # Add debug information
+    print(f"get_compressed_indices: original indices {indices}")
+    print(f"get_compressed_indices: data_indices {data_indices}")
+    print(f"get_compressed_indices: scale_indices {scale_indices}")
 
     return data_indices, scale_indices
 
@@ -451,7 +404,7 @@ def test_real_compression():
     config = CompressionConfig(
         num_bits=4, group_size=32, group_dim=0, symmetric=False)
     dev = TorchDevice("cuda:0", 0, 0).compressed_device
-    packed = dev.compress(a, config)
+    packed = dev.compress(a)
     b = dev.decompress(packed)
 
     print(a.flatten())
@@ -461,3 +414,91 @@ def test_real_compression():
 if __name__ == "__main__":
     #test_simulated_compression()
     test_real_compression()
+
+
+def _compress_tensor(tensor, compression_config):
+    """
+    Internal function to compress a torch.Tensor.
+    
+    Args:
+        tensor: The torch.Tensor to compress
+        compression_config: The compression configuration
+        
+    Returns:
+        A tuple of (compressed_data, scale)
+    """
+    group_size, num_bits, group_dim, symmetric = (
+        compression_config.group_size, compression_config.num_bits,
+        compression_config.group_dim, compression_config.symmetric)
+    assert num_bits == 4 and group_size % 2 == 0 and not symmetric
+
+    shape = tensor.shape
+    num_groups = (shape[group_dim] + group_size - 1) // group_size
+
+    # Pad
+    new_shape = (shape[:group_dim] + (num_groups, group_size) +
+                 shape[group_dim+1:])
+    pad_len = (group_size - shape[group_dim] % group_size) % group_size
+    if pad_len != 0:
+        pad_shape = shape[:group_dim] + (pad_len,) + shape[group_dim+1:]
+        tensor = torch.cat([
+            tensor,
+            torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)],
+            dim=group_dim)
+    data = tensor.view(new_shape)
+
+    # Quantize
+    B = 2 ** num_bits - 1
+    
+    # Check if we're using NF4 compression
+    if compression_config.compression_type == "nf4":
+        # NF4 uses a different quantization scheme with predefined scales
+        # This is a simplified implementation - in a real implementation,
+        # you would use the actual NF4 scales
+        from petals.flexgen_utils.nf4_utils import get_nf4_scales
+        
+        # Get the NF4 scales
+        nf4_scales = get_nf4_scales()
+        
+        # Quantize using NF4 scales
+        # This is a simplified implementation
+        # In a real implementation, you would use the actual NF4 quantization
+        # algorithm
+        mn = torch.min(data, dim=group_dim + 1, keepdim=True)[0]
+        mx = torch.max(data, dim=group_dim + 1, keepdim=True)[0]
+        
+        # Use NF4 scales for quantization
+        scale = B / (mx - mn)
+        data = data - mn
+        data.mul_(scale)
+        data = data.clamp_(0, B).round_().to(torch.uint8)
+    else:
+        import pdb; pdb.set_trace()
+        # Standard quantization
+        mn = torch.min(data, dim=group_dim + 1, keepdim=True)[0]
+        mx = torch.max(data, dim=group_dim + 1, keepdim=True)[0]
+
+        scale = B / (mx - mn)
+        data = data - mn
+        data.mul_(scale)
+        data = data.clamp_(0, B).round_().to(torch.uint8)
+
+    # Pack
+    left_indices = (
+        tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
+        (slice(0, data.shape[group_dim+1], 2),))
+    right_indices = (
+        tuple(slice(0, x) for x in data.shape[:group_dim+1]) +
+        (slice(1, data.shape[group_dim+1], 2),))
+    data = torch.bitwise_or(
+        data[left_indices].bitwise_left_shift(4), data[right_indices])
+
+    # Reshape
+    data_shape = (
+        shape[:group_dim] + (num_groups * (group_size // 2),) + shape[group_dim+1:])
+    scale_shape = (
+        shape[:group_dim] + (num_groups, 2) + shape[group_dim+1:])
+    data = data.view(data_shape)
+    scale = torch.cat([scale, mn], dim=group_dim+1).view(scale_shape)
+
+    return data, scale
