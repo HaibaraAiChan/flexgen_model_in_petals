@@ -144,64 +144,112 @@ class TorchCompressedDevice:
 
     def decompress(self, tensor):
         """
-        Decompress a tensor that was previously compressed.
+        Decompress a tensor.
         
         Args:
-            tensor: The compressed tensor to decompress
+            tensor: A tuple of (data, scale, compression_config) or a TorchTensor
             
         Returns:
-            A torch.Tensor containing the decompressed data
+            A decompressed TorchTensor
         """
-        # Check if input is a valid compressed tensor
-        if not isinstance(tensor, TorchTensor):
-            raise ValueError(f"Expected TorchTensor, got {type(tensor)}")
-        
-        # Get the compressed data and scale
-        # 压缩张量的 data 是一个元组 (compressed_data, scale, compression_config)
-        compressed_data, scale, compression_config = tensor.data
-        
-        # 获取原始形状
-        original_shape = tensor.shape
+        # 检查输入类型
+        if isinstance(tensor, tuple) and len(tensor) == 3:
+            data, scale, compression_config = tensor
+        elif isinstance(tensor, TorchTensor):
+            if not isinstance(tensor.data, tuple) or len(tensor.data) != 3:
+                raise ValueError(f"Expected TorchTensor with tuple data, got {type(tensor.data)}")
+            data, scale, compression_config = tensor.data
+        else:
+            raise ValueError(f"Expected TorchTensor or tuple, got {type(tensor)}")
+            
+        # 确保 data 和 scale 是 torch.Tensor
+        if not isinstance(data, torch.Tensor):
+            raise ValueError(f"Expected torch.Tensor for data, got {type(data)}")
+        if not isinstance(scale, torch.Tensor):
+            raise ValueError(f"Expected torch.Tensor for scale, got {type(scale)}")
+            
+        # 打印形状信息以便调试
+        print(f"Decompressing: data shape={data.shape}, scale shape={scale.shape}")
         
         # 获取压缩配置
         group_size = compression_config.group_size
-        group_dim = compression_config.group_dim
         
-        # 计算填充
-        pad_size = (group_size - original_shape[group_dim] % group_size) % group_size
-        if pad_size > 0:
-            padded_shape = list(original_shape)
-            padded_shape[group_dim] += pad_size
-            data = compressed_data.view(*padded_shape)
-            # 移除填充
-            slices = [slice(None)] * len(original_shape)
-            slices[group_dim] = slice(original_shape[group_dim])
-            data = data[slices]
-        else:
-            data = compressed_data.view(*original_shape)
+        # 处理形状不匹配的情况
+        if data.shape != scale.shape:
+            print(f"Shape mismatch: data={data.shape}, scale={scale.shape}")
+            
+            # 如果 scale 是 3D 张量，需要重塑它以匹配 data
+            if len(scale.shape) == 3 and len(data.shape) == 2:
+                # 假设 scale 的形状是 [num_groups, group_size, features]
+                # 需要将其重塑为 [num_groups * group_size, features]
+                
+                # 计算需要重复的次数
+                repeat_factor = data.shape[0] // (scale.shape[0] * scale.shape[1])
+                if repeat_factor <= 0:
+                    raise ValueError(f"Cannot reshape scale {scale.shape} to match data {data.shape}")
+                
+                # 重塑 scale
+                scale = scale.reshape(scale.shape[0] * scale.shape[1], scale.shape[2])
+                
+                # 如果需要，重复 scale 以匹配 data 的形状
+                if scale.shape[0] < data.shape[0]:
+                    scale = scale.repeat(repeat_factor, 1)
+                
+                print(f"Reshaped scale to: {scale.shape}")
+            
+            # 如果 scale 是 2D 张量，但维度顺序不同，需要转置
+            elif len(scale.shape) == 2 and len(data.shape) == 2:
+                if scale.shape[0] == data.shape[1] and scale.shape[1] == data.shape[0]:
+                    scale = scale.t()
+                else:
+                    raise ValueError(f"Cannot reshape scale {scale.shape} to match data {data.shape}")
+            
+            else:
+                raise ValueError(f"Cannot reshape scale {scale.shape} to match data {data.shape}")
         
-        # 解量化数据
-        if compression_config.compression_type == "nf4":
-            # NF4 解量化
+        try:
+            # 解压数据
             data = data.float() * scale
-        else:
-            # 标准解量化
-            data = data.float() * scale
+        except Exception as e:
+            print(f"Error during decompression: {e}")
+            print(f"Data shape: {data.shape}, Scale shape: {scale.shape}")
+            raise
         
-        return data
+        # 创建解压后的张量
+        decompressed_tensor = TorchTensor(
+            shape=data.shape,
+            dtype=data.dtype,
+            data=data,
+            device=self.base_device
+        )
+        
+        return decompressed_tensor
 
 
-def general_copy_compressed(src, dst):
+def general_copy_compressed(src, dst_indices, dst, src_indices):
     """
-    Copy data between compressed tensors, handling shape mismatches and compression type differences.
+    Copy data between compressed tensors.
     
     Args:
         src: Source compressed tensor
+        dst_indices: Destination indices
         dst: Destination compressed tensor
     """
     # Check if both tensors are compressed
-    if not hasattr(src, 'device') or not hasattr(dst, 'device'):
-        raise ValueError("Both source and destination must be compressed tensors")
+    if not hasattr(src, 'device'):
+        raise ValueError("Source must be a compressed tensor")
+        
+    # Check if dst is a TorchDevice
+    if hasattr(dst, 'device_type') and not hasattr(dst, 'data'):
+        # If dst is a TorchDevice, create a new TorchTensor
+        from petals.flexgen_utils.torch_tensor import TorchTensor
+        new_dst = TorchTensor(src.shape, src.dtype, None, dst, name=src.name)
+        # Recursively call general_copy_compressed
+        general_copy_compressed(src, dst_indices, new_dst, src_indices)
+        return
+        
+    if not hasattr(dst, 'device'):
+        raise ValueError("Destination must be a compressed tensor")
         
     # Get compression configs
     src_config = src.data[2]  # 从压缩张量的 data 元组中获取压缩配置
@@ -343,9 +391,8 @@ def compress(tensor, config):
 
         scale = B / (mx - mn)
         data = data - mn
-        data.mul_(scale)
-
-        data = data.clamp_(0, B).round_().to(torch.uint8)
+        # Fix: Do the multiplication and conversion in the correct order
+        data = (data * scale).clamp_(0, B).round_().to(torch.uint8)
         return data, mn, scale, original_shape
 
 
@@ -470,18 +517,18 @@ def _compress_tensor(tensor, compression_config):
         # Use NF4 scales for quantization
         scale = B / (mx - mn)
         data = data - mn
-        data.mul_(scale)
-        data = data.clamp_(0, B).round_().to(torch.uint8)
+        # Fix: Do the multiplication and conversion in the correct order
+        data = (data * scale).clamp_(0, B).round_().to(torch.uint8)
     else:
-        import pdb; pdb.set_trace()
+        
         # Standard quantization
         mn = torch.min(data, dim=group_dim + 1, keepdim=True)[0]
         mx = torch.max(data, dim=group_dim + 1, keepdim=True)[0]
 
         scale = B / (mx - mn)
         data = data - mn
-        data.mul_(scale)
-        data = data.clamp_(0, B).round_().to(torch.uint8)
+        # Fix: Do the multiplication and conversion in the correct order
+        data = (data * scale).clamp_(0, B).round_().to(torch.uint8)
 
     # Pack
     left_indices = (

@@ -151,6 +151,11 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
         see_memory_usage("-----------------------------------------after position_ids ")
         i = int(position_ids.item())
         
+        # 提取tensor从ValueHolder并确保它在正确的设备上
+        hidden_tensor = hidden_states.val.data if hasattr(hidden_states.val, 'data') else hidden_states.val
+        if not hidden_tensor.is_cuda:
+            hidden_tensor = hidden_tensor.cuda()
+        
         # 调用父类的forward方法，确保参数顺序正确
         # 注意：FLEX_LlamaAttention的forward方法不接受cache_write_buf参数
         # 我们需要在内部处理这个参数
@@ -158,23 +163,18 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
             # 如果提供了cache_write_buf，我们需要在内部处理它
             # 这里我们可以在调用父类的forward方法后，将结果存储到cache_write_buf中
             result = super(OptimizedLlamaAttention, self).forward(
-                hidden_states,
-                cache_read_buf,
-                cache_write_buf,  # 确保传递cache_write_buf
-                weight_read_buf,
-                i,
-                k,
-                attention_mask
+                hidden_states=hidden_tensor,
+                attention_mask=attention_mask,
+                cache_read_buf=cache_read_buf,
+                cache_write_buf=cache_write_buf,
+                weight_read_buf=weight_read_buf
             )
         else:
             result = super(OptimizedLlamaAttention, self).forward(
-                hidden_states,
-                cache_read_buf,
-                None,  # 如果没有提供cache_write_buf，则传递None
-                weight_read_buf,
-                i,
-                k,
-                attention_mask
+                hidden_states=hidden_tensor,
+                attention_mask=attention_mask,
+                cache_read_buf=cache_read_buf,
+                weight_read_buf=weight_read_buf
             )
         # 更新temp_hidden_states
         if isinstance(result, tuple) and len(result) > 1:
@@ -490,9 +490,9 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # Load from weight_home to weight_read_buf
         if overlap:
             with torch.cuda.stream(self.load_weight_stream):
-                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
         else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
 
     def delete_weight(self, j, k):
         if k == 0:

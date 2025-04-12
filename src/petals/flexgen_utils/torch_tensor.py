@@ -140,6 +140,24 @@ class TorchTensor:
         self.load_from_state(state_dict[self.name])
 
     def copy(self, dst, src_indices=None):
+        """
+        Copy from this tensor to the destination tensor or device.
+        
+        Args:
+            dst: Destination tensor or device
+            src_indices: Source indices to copy from
+            
+        Returns:
+            The destination tensor
+        """
+        # 检查 dst 是否是 TorchDevice 对象
+        if hasattr(dst, 'device_type') and not hasattr(dst, 'data'):
+            # 如果 dst 是 TorchDevice，创建一个新的 TorchTensor
+            from petals.flexgen_utils.torch_tensor import TorchTensor
+            new_dst = TorchTensor(self.shape, self.dtype, None, dst, name=self.name)
+            # 递归调用 smart_copy
+            return self.smart_copy(new_dst, src_indices)
+        
         return self.smart_copy(dst, src_indices)
 
     def smart_copy(self, dst, src_indices=None):
@@ -147,12 +165,20 @@ class TorchTensor:
         Smart copy from this tensor to the destination tensor.
         
         Args:
-            dst: Destination tensor
+            dst: Destination tensor or device
             src_indices: Source indices to copy from
             
         Returns:
             The destination tensor
         """
+        # 检查 dst 是否是 TorchDevice 对象
+        if hasattr(dst, 'device_type') and not hasattr(dst, 'data'):
+            # 如果 dst 是 TorchDevice，创建一个新的 TorchTensor
+            from petals.flexgen_utils.torch_tensor import TorchTensor
+            new_dst = TorchTensor(self.shape, self.dtype, None, dst, name=self.name)
+            # 递归调用 smart_copy
+            return self.smart_copy(new_dst, src_indices)
+            
         # 检查源张量和目标张量的设备类型
         if self.device.device_type == DeviceType.COMPRESSED:
             # 源张量是压缩的
@@ -169,41 +195,101 @@ class TorchTensor:
                 from petals.flexgen_utils.compression import TorchCompressedDevice
                 compressed_device = TorchCompressedDevice(dst.device)
                 
-                # 解压源张量
-                decompressed_tensor = compressed_device.decompress(self)
+                # 解压源张量 - 传递压缩数据元组而不是整个self对象
+                decompressed_tensor = compressed_device.decompress(self.data)
+                
+                # 确保 decompressed_tensor 和 decompressed_tensor.data 不为 None
+                if decompressed_tensor is None:
+                    raise ValueError("Failed to decompress tensor: decompressed_tensor is None")
+                
+                if decompressed_tensor.data is None:
+                    raise ValueError("Failed to decompress tensor: decompressed_tensor.data is None")
                 
                 # 如果提供了源索引，应用它们
                 if src_indices:
                     decompressed_tensor = decompressed_tensor[src_indices]
                 
+                # 确保 dst.data 不为 None
+                if dst.data is None:
+                    # 如果 dst.data 为 None，初始化它
+                    dst.data = torch.zeros_like(decompressed_tensor.data, device=dst.device.dev)
+                
                 # 复制到目标张量
                 dst.data.copy_(decompressed_tensor.data)
         elif hasattr(dst, 'device') and dst.device.device_type == DeviceType.COMPRESSED:
             # 目标张量是压缩的，但源张量不是
-            # 获取压缩配置
-            comp_config = dst.data[2]
-            
-            # 创建压缩设备
-            from petals.flexgen_utils.compression import TorchCompressedDevice
-            compressed_device = TorchCompressedDevice(dst.device.base_device)
-            
-            # 如果提供了源索引，应用它们
-            if src_indices:
-                src_data = self.data[src_indices]
+            # 检查 self.data 是否已经是压缩格式 (tensor, scale, compression_config)
+            if isinstance(self.data, tuple) and len(self.data) == 3 and hasattr(self.data[2], 'compression_type'):
+                # 如果 self.data 已经是压缩格式，直接使用它
+                dst.data = self.data
             else:
-                src_data = self.data
-            
-            # 压缩源数据
-            compressed_data = compressed_device.compress(src_data, comp_config)
-            
-            # 复制压缩数据到目标张量
-            dst.data[0].data.copy_(compressed_data.data[0].data)
-            dst.data[1].data.copy_(compressed_data.data[1].data)
+                # 如果 self.data 不是压缩格式，需要先压缩
+                # 如果 dst.data 为 None，需要先初始化它
+                if dst.data is None:
+                    from petals.flexgen_utils.compression import TorchCompressedDevice
+                    compressed_device = TorchCompressedDevice(dst.device.base_device)
+                    # 使用默认的压缩配置
+                    from petals.flexgen_utils.compression import CompressionConfig
+                    comp_config = CompressionConfig()
+                else:
+                    # 如果dst.data已经存在，使用其现有的压缩配置
+                    comp_config = dst.data[2]
+                    compressed_device = TorchCompressedDevice(dst.device.base_device)
+                
+                # 如果提供了源索引，应用它们
+                if src_indices:
+                    src_data = self.data[src_indices]
+                else:
+                    src_data = self.data
+                
+                # 压缩源张量并复制
+                compressed_tensor = compressed_device.compress(src_data, comp_config)
+                dst.data = compressed_tensor.data
         else:
-            # 两个张量都不是压缩的，使用 general_copy
-            from petals.flexgen_utils.base import general_copy
-            general_copy(dst, None, self, src_indices)
-        
+            # 普通张量复制，dst is a TorchTensor
+            # 检查 self.data 是否已经是压缩格式 (tensor, scale, compression_config)
+            if isinstance(self.data, tuple) and len(self.data) == 3 and hasattr(self.data[2], 'compression_type'):
+                # 如果 self.data 已经是压缩格式，需要先解压
+                from petals.flexgen_utils.compression import TorchCompressedDevice
+                compressed_device = TorchCompressedDevice(dst.device)
+                
+                # 解压源张量 - 传递压缩数据元组而不是整个self对象
+                decompressed_tensor = compressed_device.decompress(self.data)
+                
+                # 确保 decompressed_tensor 和 decompressed_tensor.data 不为 None
+                if decompressed_tensor is None:
+                    raise ValueError("Failed to decompress tensor: decompressed_tensor is None")
+                
+                if decompressed_tensor.data is None:
+                    raise ValueError("Failed to decompress tensor: decompressed_tensor.data is None")
+                
+                # 如果提供了源索引，应用它们
+                if src_indices:
+                    decompressed_tensor = decompressed_tensor[src_indices]
+                
+                # 确保 dst.data 不为 None
+                if dst.data is None:
+                    # 如果 dst.data 为 None，初始化它
+                    dst.data = torch.zeros_like(decompressed_tensor.data, device=dst.device.dev)
+                
+                # 复制到目标张量
+                dst.data.copy_(decompressed_tensor.data)
+            else:
+                # 普通张量复制
+                # 确保 dst.data 不为 None
+                if dst.data is None:
+                    # 如果 dst.data 为 None，初始化它
+                    if src_indices:
+                        dst.data = torch.zeros_like(self.data[src_indices], device=dst.device.dev)
+                    else:
+                        dst.data = torch.zeros_like(self.data, device=dst.device.dev)
+                
+                # 复制数据
+                if src_indices:
+                    dst.data.copy_(self.data[src_indices])
+                else:
+                    dst.data.copy_(self.data)
+                
         return dst
 
     def move(self, dst):

@@ -100,6 +100,14 @@ def general_copy(dst, dst_indices, src, src_indices):
     # 确保 src 和 dst 都是 TorchTensor 对象，而不是 TorchCompressedDevice 对象
     if not hasattr(src, 'shape') or not hasattr(dst, 'shape'):
         print(f"Warning: general_copy called with non-TorchTensor objects: src={type(src)}, dst={type(dst)}")
+        # 如果 dst 是 TorchDevice，尝试创建一个新的 TorchTensor
+        if hasattr(dst, 'device_type') and dst.device_type == DeviceType.CUDA:
+            # 创建一个新的 TorchTensor
+            from petals.flexgen_utils.torch_tensor import TorchTensor
+            new_dst = TorchTensor(src.shape, src.dtype, None, dst)
+            # 递归调用 general_copy
+            general_copy(new_dst, None, src, src_indices)
+            return
         # 如果 dst 是 TorchCompressedDevice，尝试使用其 compress 方法
         if hasattr(dst, 'compress'):
             # 获取压缩配置

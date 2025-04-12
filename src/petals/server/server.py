@@ -260,12 +260,12 @@ class Server:
                     0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=True,  # 暂时禁用权重压缩，避免 compressed_device 问题
+                    compress_weight=True,  
                     comp_weight_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=0, symmetric=False,
                         compression_type="nf4"),  # Set compression type to NF4
-                    compress_cache=False,  # 暂时禁用缓存压缩
+                    compress_cache=False,  
                     comp_cache_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=2, symmetric=False))

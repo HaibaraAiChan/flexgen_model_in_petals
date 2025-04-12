@@ -209,12 +209,9 @@ def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index
                 # 创建压缩设备
                 compressed_device = TorchCompressedDevice(env.cpu)
                 # 解压权重
-                decompressed_tensor = compressed_device.decompress(weight.data, policy.comp_weight_config)
+                decompressed_tensor = compressed_device.decompress(weight.data)
                 # 移动到正确的设备
                 param.data = decompressed_tensor.to(param.device)
-            else:
-                # 不压缩的情况，直接移动
-                param.data = weight.data.to(param.device)
             
             petals_weights.append(param.data)
         
@@ -271,9 +268,46 @@ class LlamaDecoderLayer(nn.Module):
         return petals_attention_weights, petals_mlp_weights
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        read_buf1, read_buf2 = weight_home.val
-        self.self_attn.load_weight(read_buf1, weight_read_buf, k)
-        self.mlp.load_weight(read_buf2, weight_read_buf, k)
+        """
+        Load weights from weight_home to weight_read_buf.
+        
+        Args:
+            weight_home: The home of the weights
+            weight_read_buf: The buffer to read the weights into
+            k: The batch index
+        """
+        # 获取权重
+        if isinstance(weight_home.val, tuple):
+            # 如果 weight_home.val 是一个元组，直接使用它
+            weights = weight_home.val
+        else:
+            # 否则，从 weight_home.val 中获取权重
+            weights = weight_home.val[k]
+        
+        # 检查 weights 是否是压缩格式的元组 (data, scale, compression_config)
+        if isinstance(weights, TorchTensor) and len(weights.data) == 3:
+            # 如果是压缩格式，直接使用整个元组
+            compressed_weight = weights
+            # 存储到 weight_read_buf，使用相同的压缩格式
+            weight_read_buf.store((
+                (compressed_weight, None), (compressed_weight, None), 
+                (compressed_weight, None), (compressed_weight, None),
+                (compressed_weight, None), (compressed_weight, None), 
+                (compressed_weight, None), (compressed_weight, None)
+            ))
+        else:
+            # 否则，解包权重
+            q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, input_layernorm = weights
+            
+            # 存储到 weight_read_buf
+            weight_read_buf.store((
+                (q_proj, None), (k_proj, None), (v_proj, None), (o_proj, None),
+                (gate_proj, None), (up_proj, None), (down_proj, None), (input_layernorm, None)
+            ))
+        
+        # 加载注意力层和MLP层的权重
+        self.self_attn.load_weight(weight_home, weight_read_buf)
+        self.mlp.load_weight(weight_home, weight_read_buf)
 
     def init_cache_one_gpu_batch(self, cache_home):
         self.self_attn.init_cache_one_gpu_batch(cache_home)
@@ -392,9 +426,9 @@ class LlamaLM:
         # Load from weight_home to weight_read_buf
         if overlap:
             with torch.cuda.stream(self.load_weight_stream):
-                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
         else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
 
     def delete_weight(self, j, k):
         if k == 0:
@@ -1106,78 +1140,44 @@ class FLEX_LlamaMLP(LlamaMLP):
         self.task = task
 
     def init_weight(self, weight_home, path):
-        # Use the correct hidden size from the config
         h, dtype = (self.config.hidden_size, np.float16)
-        i, dtype = (self.config.intermediate_size, np.float16)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        weight_specs = [
-            # 4 weight files
-            # gate_proj
-            ((i, h), dtype, path + "mlp.gate_proj.weight"),
-            # down_proj
-            ((h, i), dtype, path + "mlp.down_proj.weight"),
-            # up_proj
-            ((i, h), dtype, path + "mlp.up_proj.weight"),
-            # post attention layer norm
-            ((h, ), dtype, path + "post_attention_layernorm.weight"),
-        ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
+        
+        # 创建权重规格字典，使用名称作为键
+        weight_specs = {
+            "q_proj": ((h, h), dtype, path + "self_attn.q_proj.weight"),
+            "k_proj": ((h, h), dtype, path + "self_attn.k_proj.weight"),
+            "v_proj": ((h, h), dtype, path + "self_attn.v_proj.weight"),
+            "o_proj": ((h, h), dtype, path + "self_attn.o_proj.weight"),
+            "input_layernorm": ((h, ), dtype, path + "input_layernorm.weight"),
+            "rotary_emb": ((64, ), dtype, path + "self_attn.rotary_emb.inv_freq"),
+        }
+        
+        # 初始化权重列表
+        weights = {}
+        for name, spec in weight_specs.items():
+            shape, dtype, file_path = spec
+            weights[name] = init_weight_list([(shape, dtype, file_path)], self.policy, self.env)[0]
+        
+        # 存储权重字典
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
-        # In LlamaDecoderLayer, weight_home.val contains (home1, home2)
-        # We need to access the weights stored in home1
-        if isinstance(weight_home.val, tuple) and len(weight_home.val) == 2:
-            # This is the case when called from LlamaDecoderLayer
-            home1, _ = weight_home.val
-            # Check if home1 is a ValueHolder or a list
-            if hasattr(home1, 'val'):
-                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1.val
-            else:
-                # If home1 is a list, use it directly
-                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1
-        else:
-            # This is the case when called directly
-            w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_home.val
+    def load_weight(self, weight_home, weight_read_buf):
+        # 从weight_home获取权重字典
+        weights = weight_home.val
         
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            
-            # 确保正确复制压缩的权重
-            # 对于压缩的权重，我们需要确保复制整个压缩结构
-            if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-                # 直接复制整个压缩结构
-                q_proj = w_q.copy(dst1)
-                k_proj = w_k.copy(dst1)
-                v_proj = w_v.copy(dst1)
-                o_proj = w_out.copy(dst1)
-                input_layernorm_copy = input_layernorm.copy(dst2)
-                rotary_embed_copy = rotary_embed.copy(dst2)
-                q_norm = input_layernorm.copy(dst2)
-                k_norm = input_layernorm.copy(dst2)
-            else:
-                # 使用 smart_copy 复制未压缩的权重
-                q_proj = w_q.smart_copy(dst1)
-                k_proj = w_k.smart_copy(dst1)
-                v_proj = w_v.smart_copy(dst1)
-                o_proj = w_out.smart_copy(dst1)
-                input_layernorm_copy = input_layernorm.smart_copy(dst2)
-                rotary_embed_copy = rotary_embed.smart_copy(dst2)
-                q_norm = input_layernorm.smart_copy(dst2)
-                k_norm = input_layernorm.smart_copy(dst2)
-            
-            # 存储复制后的权重
-            weight_read_buf.store((
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
-                input_layernorm_copy,
-                rotary_embed_copy,
-                q_norm,
-                k_norm
-            ))
+        # 检查权重是否被压缩
+        if isinstance(weights, tuple) and len(weights) == 3:
+            # 如果是压缩格式，解压缩权重
+            data, scale, compression_config = weights
+            weights = decompress_tensor(data, scale, compression_config)
+        
+        # 确保weights是字典类型
+        if not isinstance(weights, dict):
+            raise ValueError("Expected weights to be a dictionary")
+        
+        # 将权重存储到weight_read_buf中
+        weight_read_buf.val = weights
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -1188,42 +1188,104 @@ class FLEX_LlamaMLP(LlamaMLP):
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
-    def forward(self, hidden, cache_read_buf, cache_write_buf, weight_read_buf, i, k, attention_mask):
+    def forward(self, hidden_states, attention_mask=None, cache_read_buf=None, cache_write_buf=None, weight_read_buf=None):
+        # Convert hidden_states to torch.Tensor if it's a ValueHolder
+        if hasattr(hidden_states, 'val'):
+            hidden_states = hidden_states.val
+        if not isinstance(hidden_states, torch.Tensor):
+            raise ValueError(f"Expected hidden_states to be a torch.Tensor, got {type(hidden_states)}")
+        
         # 获取权重
-        if k == self.policy.num_gpu_batches - 1:
-            ((gate, _), (down, _),
-             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
-        else:
-            ((gate, _), (down, _),
-             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
+        weights = weight_read_buf.val
         
-        # 如果启用了权重压缩，需要先解压
-        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-            compressed_device = TorchCompressedDevice(self.compute)
-            gate = compressed_device.decompress(gate, self.policy.comp_weight_config)
-            down = compressed_device.decompress(down, self.policy.comp_weight_config)
-            up = compressed_device.decompress(up, self.policy.comp_weight_config)
-            post_attention_layernorm = compressed_device.decompress(post_attention_layernorm, self.policy.comp_weight_config)
+        # 检查权重是否被压缩
+        if isinstance(weights, tuple) and len(weights) == 3:
+            # 如果是压缩格式，解压缩权重
+            data, scale, compression_config = weights
+            weights = decompress_tensor(data, scale, compression_config)
         
-        # 应用后注意力层归一化
-        hidden = post_attention_layernorm(hidden)
+        # 确保weights是字典类型
+        if not isinstance(weights, dict):
+            raise ValueError("Expected weights to be a dictionary")
         
-        # 应用门控和上投影
-        gate_output = gate(hidden)
-        up_output = up(hidden)
+        # 获取各个权重
+        q_proj = weights.get("q_proj")
+        k_proj = weights.get("k_proj")
+        v_proj = weights.get("v_proj")
+        o_proj = weights.get("o_proj")
+        input_layernorm_weight = weights.get("input_layernorm")
+        rotary_emb = weights.get("rotary_emb")
         
-        # 应用激活函数和乘法
-        hidden = F.silu(gate_output) * up_output
+        # 检查必要的权重是否存在
+        if not all([q_proj, k_proj, v_proj, o_proj, input_layernorm_weight]):
+            raise ValueError("Missing required weights")
         
-        # 应用下投影
-        hidden = down(hidden)
+        # 应用输入层归一化 - 修复：不要将tensor当作函数调用
+        # 创建RMSNorm对象并应用
+        input_layernorm = FLEX_LlamaRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        input_layernorm.weight = input_layernorm_weight
+        hidden_states = input_layernorm(hidden_states)
         
-        # 如果需要压缩输出
-        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-            compressed_device = TorchCompressedDevice(self.compute)
-            hidden = compressed_device.compress(hidden, self.policy.comp_weight_config)
+        # 计算查询、键和值
+        q = q_proj(hidden_states)
+        k = k_proj(hidden_states)
+        v = v_proj(hidden_states)
         
-        return hidden
+        # 应用旋转位置编码
+        if rotary_emb is not None:
+            q = rotary_emb(q)
+            k = rotary_emb(k)
+        
+        # 计算注意力
+        attention_output = self.attention(q, k, v, attention_mask)
+        
+        # 应用输出投影
+        output = o_proj(attention_output)
+        
+        return output
+
+    def attention(self, q, k, v, attention_mask):
+        # Handle compressed tensors
+        if self.policy.compress_weight:
+            # Decompress tensors if they are compressed
+            q = q.decompress() if hasattr(q, 'decompress') else q
+            k = k.decompress() if hasattr(k, 'decompress') else k
+            v = v.decompress() if hasattr(v, 'decompress') else v
+        
+        # Get dimensions
+        batch_size, seq_length, hidden_size = q.shape
+        head_dim = hidden_size // self.num_heads
+        
+        # Reshape query, key, value for multi-head attention
+        q = q.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
+        
+        # Scale query
+        q = q / math.sqrt(head_dim)
+        
+        # Compute attention scores
+        attn_weights = torch.matmul(q, k.transpose(-2, -1))
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        
+        # Apply softmax
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        
+        # Reshape output
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_length, hidden_size)
+        
+        # Handle compression for output if needed
+        if self.policy.compress_weight:
+            attn_output = attn_output.compress(self.policy.comp_weight_config) if hasattr(attn_output, 'compress') else attn_output
+        
+        return attn_output
 
 class FLEX_LlamaAttention(LlamaAttention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -1250,78 +1312,42 @@ class FLEX_LlamaAttention(LlamaAttention):
     def init_weight(self, weight_home, path):
         h, dtype = (self.config.hidden_size, np.float16)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        weight_specs = [
-            # 5 weight files
-            # w_q
-            ((h, h), dtype, path + "self_attn.q_proj.weight"),
-            # w_k
-            ((h, h), dtype, path + "self_attn.k_proj.weight"),
-            # w_v
-            ((h, h), dtype, path + "self_attn.v_proj.weight"),
-            # w_out
-            ((h, h), dtype, path + "self_attn.o_proj.weight"),
-            # input layer norm
-            ((h, ), dtype, path + "input_layernorm.weight"),
-            # rotary_embed
-            ((64, ), dtype, path + "self_attn.rotary_emb.inv_freq"),
-        ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
+        
+        # 创建权重规格字典，使用名称作为键
+        weight_specs = {
+            "q_proj": ((h, h), dtype, path + "self_attn.q_proj.weight"),
+            "k_proj": ((h, h), dtype, path + "self_attn.k_proj.weight"),
+            "v_proj": ((h, h), dtype, path + "self_attn.v_proj.weight"),
+            "o_proj": ((h, h), dtype, path + "self_attn.o_proj.weight"),
+            "input_layernorm": ((h, ), dtype, path + "input_layernorm.weight"),
+            "rotary_emb": ((64, ), dtype, path + "self_attn.rotary_emb.inv_freq"),
+        }
+        
+        # 初始化权重列表
+        weights = {}
+        for name, spec in weight_specs.items():
+            shape, dtype, file_path = spec
+            weights[name] = init_weight_list([(shape, dtype, file_path)], self.policy, self.env)[0]
+        
+        # 存储权重字典
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
-        # In LlamaDecoderLayer, weight_home.val contains (home1, home2)
-        # We need to access the weights stored in home1
-        if isinstance(weight_home.val, tuple) and len(weight_home.val) == 2:
-            # This is the case when called from LlamaDecoderLayer
-            home1, _ = weight_home.val
-            # Check if home1 is a ValueHolder or a list
-            if hasattr(home1, 'val'):
-                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1.val
-            else:
-                # If home1 is a list, use it directly
-                w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = home1
-        else:
-            # This is the case when called directly
-            w_q, w_k, w_v, w_out, input_layernorm, rotary_embed = weight_home.val
-            
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            
-            # 确保正确复制压缩的权重
-            # 对于压缩的权重，我们需要确保复制整个压缩结构
-            if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-                # 直接复制整个压缩结构
-                q_proj = w_q.copy(dst1)
-                k_proj = w_k.copy(dst1)
-                v_proj = w_v.copy(dst1)
-                o_proj = w_out.copy(dst1)
-                input_layernorm_copy = input_layernorm.copy(dst2)
-                rotary_embed_copy = rotary_embed.copy(dst2)
-                q_norm = input_layernorm.copy(dst2)
-                k_norm = input_layernorm.copy(dst2)
-            else:
-                # 使用 smart_copy 复制未压缩的权重
-                q_proj = w_q.smart_copy(dst1)
-                k_proj = w_k.smart_copy(dst1)
-                v_proj = w_v.smart_copy(dst1)
-                o_proj = w_out.smart_copy(dst1)
-                input_layernorm_copy = input_layernorm.smart_copy(dst2)
-                rotary_embed_copy = rotary_embed.smart_copy(dst2)
-                q_norm = input_layernorm.smart_copy(dst2)
-                k_norm = input_layernorm.smart_copy(dst2)
-            
-            # 存储复制后的权重
-            weight_read_buf.store((
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
-                input_layernorm_copy,
-                rotary_embed_copy,
-                q_norm,
-                k_norm
-            ))
+    def load_weight(self, weight_home, weight_read_buf):
+        # 从weight_home获取权重字典
+        weights = weight_home.val
+        
+        # 检查权重是否被压缩
+        if isinstance(weights, tuple) and len(weights) == 3:
+            # 如果是压缩格式，解压缩权重
+            data, scale, compression_config = weights
+            weights = decompress_tensor(data, scale, compression_config)
+        
+        # 确保weights是字典类型
+        if not isinstance(weights, dict):
+            raise ValueError("Expected weights to be a dictionary")
+        
+        # 将权重存储到weight_read_buf中
+        weight_read_buf.val = weights
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.task is None:
@@ -1401,124 +1427,3 @@ class FLEX_LlamaAttention(LlamaAttention):
             assert self.policy.attn_sparsity >= 1.0
         else:
             raise ValueError(f"Invalid path: {path}")
-
-    def store_cache(self, cache_home, cache_write_buf, i):
-        # shape: (s, b * n_head, head_dim)
-        k_home, v_home = cache_home.val
-        k_new, v_new = cache_write_buf.pop()
-
-        if i == self.task.gen_len - 1:  # last token, no need to store cache
-            return
-
-        if i == 0:  # prefill
-            indices = (slice(0, k_new.shape[0]),
-                       slice(0, k_new.shape[1]))
-        else:  # decoding
-            pos = self.task.prompt_len + i
-            indices = (slice(pos - k_new.shape[0], pos),
-                       slice(0, k_new.shape[1]))
-
-        general_copy(k_home, indices, k_new, None, self.policy.compress_weight)
-        general_copy(v_home, indices, v_new, None, self.policy.compress_weight)
-
-    def forward(self, hidden, cache_read_buf, cache_write_buf, weight_read_buf, i, k, attention_mask):
-        # 获取权重
-        if k == self.policy.num_gpu_batches - 1:
-            ((q_proj, _), (k_proj, _),
-             (v_proj, _), (o_proj, _),
-             (input_layernorm, _), (rotary_emb, _),
-             (q_norm, _), (k_norm, _)) = weight_read_buf.val
-        else:
-            ((q_proj, _), (k_proj, _),
-             (v_proj, _), (o_proj, _),
-             (input_layernorm, _), (rotary_emb, _),
-             (q_norm, _), (k_norm, _)) = weight_read_buf.val
-        
-        # 如果启用了权重压缩，需要先解压
-        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-            compressed_device = TorchCompressedDevice(self.compute)
-            q_proj = compressed_device.decompress(q_proj, self.policy.comp_weight_config)
-            k_proj = compressed_device.decompress(k_proj, self.policy.comp_weight_config)
-            v_proj = compressed_device.decompress(v_proj, self.policy.comp_weight_config)
-            o_proj = compressed_device.decompress(o_proj, self.policy.comp_weight_config)
-            input_layernorm = compressed_device.decompress(input_layernorm, self.policy.comp_weight_config)
-            q_norm = compressed_device.decompress(q_norm, self.policy.comp_weight_config)
-            k_norm = compressed_device.decompress(k_norm, self.policy.comp_weight_config)
-            rotary_emb = compressed_device.decompress(rotary_emb, self.policy.comp_weight_config)
-        
-        # 应用 q_norm 和 k_norm
-        q = q_norm(hidden)
-        k = k_norm(hidden)
-        
-        # 应用投影
-        q = q_proj(q)
-        k = k_proj(k)
-        v = v_proj(hidden)
-        
-        # 应用旋转嵌入
-        q = rotary_emb(q)
-        k = rotary_emb(k)
-        
-        # 处理缓存
-        if cache_read_buf is not None and cache_read_buf.val is not None:
-            k_cache, v_cache = cache_read_buf.val
-            if self.policy.compress_cache and self.policy.comp_cache_config.compression_type == "nf4":
-                compressed_device = TorchCompressedDevice(self.compute)
-                k_cache = compressed_device.decompress(k_cache, self.policy.comp_cache_config)
-                v_cache = compressed_device.decompress(v_cache, self.policy.comp_cache_config)
-        
-        # 计算注意力
-        attn_output = self.attention(q, k, v, attention_mask)
-        
-        # 应用输出投影
-        attn_output = o_proj(attn_output)
-        
-        # 如果需要压缩输出
-        if self.policy.compress_weight and self.policy.comp_weight_config.compression_type == "nf4":
-            compressed_device = TorchCompressedDevice(self.compute)
-            attn_output = compressed_device.compress(attn_output, self.policy.comp_weight_config)
-        
-        return attn_output
-
-    def attention(self, q, k, v, attention_mask):
-        # Handle compressed tensors
-        if self.policy.compress_weight:
-            # Decompress tensors if they are compressed
-            q = q.decompress() if hasattr(q, 'decompress') else q
-            k = k.decompress() if hasattr(k, 'decompress') else k
-            v = v.decompress() if hasattr(v, 'decompress') else v
-        
-        # Get dimensions
-        batch_size, seq_length, hidden_size = q.shape
-        head_dim = hidden_size // self.num_heads
-        
-        # Reshape query, key, value for multi-head attention
-        q = q.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_length, self.num_heads, head_dim).transpose(1, 2)
-        
-        # Scale query
-        q = q / math.sqrt(head_dim)
-        
-        # Compute attention scores
-        attn_weights = torch.matmul(q, k.transpose(-2, -1))
-        
-        # Apply attention mask if provided
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        
-        # Apply softmax
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, v)
-        
-        # Reshape output
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_length, hidden_size)
-        
-        # Handle compression for output if needed
-        if self.policy.compress_weight:
-            attn_output = attn_output.compress(self.policy.comp_weight_config) if hasattr(attn_output, 'compress') else attn_output
-        
-        return attn_output
