@@ -1,6 +1,6 @@
 """
 Usage:
-python3 -m flexgen.flex_llama --model huggingface repo --gpu-batch-size 32 --percent 100 0 100 0 100 0
+python3 -m petals.models.llama.flex_llama --model huggingface repo --gpu-batch-size 32 --percent 100 0 100 0 100 0
 modified on flex_opt.py
 """
 
@@ -12,17 +12,19 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from flexgen.compression import CompressionConfig
-from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import fix_recursive_import, general_copy, DeviceType, TorchDevice, TorchDisk, \
+from petals.flexgen_utils.compression import CompressionConfig
+from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from petals.flexgen_utils.pytorch_backend import fix_recursive_import, general_copy, DeviceType, TorchDevice, TorchDisk, \
     TorchMixedDevice
-from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
+from petals.flexgen_utils.utils import (GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
+from petals.flexgen_utils.task import Task
+from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from torch import nn
 from transformers import AutoTokenizer
-from flexgen.timer import timers
+from petals.flexgen_utils.timer import timers
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 fix_recursive_import()
