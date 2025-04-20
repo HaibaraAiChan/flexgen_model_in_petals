@@ -6,8 +6,8 @@ from transformers.generation.utils import GenerateNonBeamOutput, GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.llama import LlamaForCausalLM
 
-from petals.models.llama.config import DistributedLlamaConfig
-from petals.models.llama.model import DistributedLlamaForCausalLM
+from bloombee.models.llama.config import DistributedLlamaConfig
+from bloombee.models.llama.model import DistributedLlamaForCausalLM
 
 
 class DistributedLlamaForSpeculativeGeneration(DistributedLlamaForCausalLM, GenerationMixin):

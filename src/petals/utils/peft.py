@@ -17,10 +17,10 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers.utils import get_file_from_repo
 
-from petals.server.block_utils import get_model_block, resolve_block_dtype
-from petals.utils.convert_block import QuantType
-from petals.utils.disk_cache import allow_cache_reads, allow_cache_writes, free_disk_space_for
-from petals.utils.misc import get_size_in_bytes
+from bloombee.server.block_utils import get_model_block, resolve_block_dtype
+from bloombee.utils.convert_block import QuantType
+from bloombee.utils.disk_cache import allow_cache_reads, allow_cache_writes, free_disk_space_for
+from bloombee.utils.misc import get_size_in_bytes
 
 logger = get_logger(__name__)
 

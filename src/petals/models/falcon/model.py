@@ -12,13 +12,13 @@ from transformers.models.falcon import (
     FalconPreTrainedModel,
 )
 
-from petals.client.from_pretrained import FromPretrainedMixin
-from petals.client.lm_head import LMHead
-from petals.client.ptune import PTuneMixin
-from petals.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
-from petals.client.remote_sequential import RemoteSequential
-from petals.models.falcon.config import DistributedFalconConfig
-from petals.utils.auto_config import DefaultRevisionMixin
+from bloombee.client.from_pretrained import FromPretrainedMixin
+from bloombee.client.lm_head import LMHead
+from bloombee.client.ptune import PTuneMixin
+from bloombee.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
+from bloombee.client.remote_sequential import RemoteSequential
+from bloombee.models.falcon.config import DistributedFalconConfig
+from bloombee.utils.auto_config import DefaultRevisionMixin
 
 logger = get_logger(__name__)
 

@@ -31,22 +31,22 @@ from hivemind.utils.asyncio import amap_in_executor, anext
 from hivemind.utils.logging import get_logger
 from hivemind.utils.streaming import split_for_streaming
 
-import petals
-from petals.data_structures import CHAIN_DELIMITER, UID_DELIMITER, Handle, ModuleUID
-from petals.server.backend import TransformerBackend
-from petals.server.block_functions import iterate_rpc_inference, run_rpc_backward, run_rpc_forward
-from petals.server.task_prioritizer import DummyTaskPrioritizer, TaskPrioritizerBase
-from petals.utils.convert_block import QuantType
+import bloombee
+from bloombee.data_structures import CHAIN_DELIMITER, UID_DELIMITER, Handle, ModuleUID
+from bloombee.server.backend import TransformerBackend
+from bloombee.server.block_functions import iterate_rpc_inference, run_rpc_backward, run_rpc_forward
+from bloombee.server.task_prioritizer import DummyTaskPrioritizer, TaskPrioritizerBase
+from bloombee.utils.convert_block import QuantType
 
 logger = get_logger(__name__)
 
 from datetime import datetime, timezone  
-def print_time_now(s):
-    # Get the current time in UTC  
-    current_utc_datetime = datetime.now(timezone.utc)  
-    # Format the datetime to the desired string format  
-    formatted_utc_time = current_utc_datetime.strftime('%Y-%m-%d %H:%M:%S.%f %Z')  
-    print('\t\t\t'+s+" UTC Time: "+ str(formatted_utc_time) )  
+# def print_time_now(s):
+#     # Get the current time in UTC  
+#     current_utc_datetime = datetime.now(timezone.utc)  
+#     # Format the datetime to the desired string format  
+#     formatted_utc_time = current_utc_datetime.strftime('%Y-%m-%d %H:%M:%S.%f %Z')  
+#     print('\t\t\t'+s+" UTC Time: "+ str(formatted_utc_time) )  
     
 
 
@@ -148,7 +148,7 @@ class TransformerConnectionHandler(ConnectionHandler):
     ) -> AsyncIterator[runtime_pb2.ExpertResponse]:
         """Compute a single step of inference using attention cache; update attention cache accordingly."""
         print('come into rpc_inference ..........')
-        print_time_now('')
+        # print_time_now('')
         async with timeout(self.session_timeout):
             
             try:
@@ -165,7 +165,7 @@ class TransformerConnectionHandler(ConnectionHandler):
                 metadata = MSGPackSerializer.loads(request.metadata) if request.metadata else {}
                 end_msg_serial_time = perf_counter()
                 print('msg_Serializer time ', end_msg_serial_time-start_time)
-                print_time_now('')
+                # print_time_now('')
                 
                 requested_backends = tuple(self.module_backends[uid] for uid in requested_uids)
                 max_length = metadata.get("max_length")
@@ -189,7 +189,7 @@ class TransformerConnectionHandler(ConnectionHandler):
                 batch_size = request.tensors[0].size[0] if request.tensors else 1
                 end_batch_size_time = perf_counter()
                 print('prepare time ', end_batch_size_time-end_msg_serial_time)
-                print_time_now('')
+                # print_time_now('')
                 
                 push_time = []
                 async with self._allocate_cache(
@@ -201,7 +201,7 @@ class TransformerConnectionHandler(ConnectionHandler):
                     background_tasks = set()
                     step_=0
                     print('before async for output_tensors, can_push, step_metadata in iterate_rpc_inference() ') ###
-                    print_time_now('')
+                    # print_time_now('')
                     async for output_tensors, can_push, step_metadata in iterate_rpc_inference(
                         requested_uids=requested_uids,
                         requested_backends=requested_backends,
@@ -217,39 +217,39 @@ class TransformerConnectionHandler(ConnectionHandler):
                         args_structure=args_structure,
                     ):
                         print('=================================================   server rpc_inference step ',step_) ###
-                        print_time_now('')
+                        # print_time_now('')
                         step_+=1 ###
                         
                         can_push_case_time=perf_counter() ###
 
                         if can_push:
-                            print('request uid list ', request.uid)
+                            # print('request uid list ', request.uid)
                             # print('output_tensors[0] ', output_tensors[0]) # buffer: binary
-                            print('step_metadata ', step_metadata)
+                            # print('step_metadata ', step_metadata)
                             task = asyncio.create_task(self._push_outputs(request, output_tensors[0], step_metadata))
                             background_tasks.add(task)  # Keep reference until it is done to save it from GC
                             task.add_done_callback(background_tasks.discard)
                         start_ExpertResponse_time=perf_counter() ###
                         push_time.append(start_ExpertResponse_time-can_push_case_time) ###
-                        print('current step push outputs task prepare time ', start_ExpertResponse_time-can_push_case_time) ###
-                        print_time_now('')
+                        # print('current step push outputs task prepare time ', start_ExpertResponse_time-can_push_case_time) ###
+                        # print_time_now('')
                         yield runtime_pb2.ExpertResponse(tensors=output_tensors)
                         end_ExpertResponse_time=perf_counter() ###
-                        print('runtime_pb2.ExpertResponse push outputs respond time', end_ExpertResponse_time-start_ExpertResponse_time) ###
-                        print_time_now('')
+                        # print('runtime_pb2.ExpertResponse push outputs respond time', end_ExpertResponse_time-start_ExpertResponse_time) ###
+                        # print_time_now('')
                         print() ###
                         
                     end_iterate_rpc_inference_time=perf_counter() ###
-                    print('mean push time ', np.mean(push_time[4:])) ###
-                    print('finish iterate_rpc_inference time(sec) ', end_iterate_rpc_inference_time - end_cache_time) ###
-                    print_time_now('')
+                    # print('mean push time ', np.mean(push_time[4:])) ###
+                    # print('finish iterate_rpc_inference time(sec) ', end_iterate_rpc_inference_time - end_cache_time) ###
+                    # print_time_now('')
             
             finally:
                 self._log_request("rpc_inference.close", requested_uids, context)
-                print_time_now('')
+                # print_time_now('')
                 print('end of  rpc_inference ..........')  ###
                 end_time_rpc_infer = perf_counter() ###
-                print('rpc_inference total time(sec) ', end_time_rpc_infer - start_time) ###
+                # print('rpc_inference total time(sec) ', end_time_rpc_infer - start_time) ###
             
 
     @contextlib.contextmanager
@@ -344,8 +344,8 @@ class TransformerConnectionHandler(ConnectionHandler):
                         )
                     
                     end_meta_push_time = perf_counter()
-                    print('_iterate_inference_steps: prepare time ', end_meta_push_time - start_meta_time)
-                    print_time_now('')
+                    # print('_iterate_inference_steps: prepare time ', end_meta_push_time - start_meta_time)
+                    # print_time_now('')
                     # print('anext_task ', anext_task)
                     # print('get_push_task ', get_push_task)
                     # print('session_id ', session_id)
@@ -364,25 +364,25 @@ class TransformerConnectionHandler(ConnectionHandler):
                     # and to be able to promptly respond to requests coming from different sources.
                     end_push_time = perf_counter()
                     print('async requests handling time ', end_push_time - end_meta_push_time)
-                    print_time_now('')
+                    # print_time_now('')
                     if anext_task in done:
                         request = await anext_task
                         anext_task = None
                         print(f'----------------------anext_task done first')
-                        print_time_now('')
+                        # print_time_now('')
                     elif get_push_task in done:
                         request = await get_push_task
                         get_push_task = None
                         print(f'get_push_task done first')
-                        print_time_now('')
+                        # print_time_now('')
                     else:
                         self._log_request("rpc_inference.step", requested_uids, context, warning="timed out")
                         anext_task.cancel()
                         get_push_task.cancel()
                         return
-            end_iterate_inference_steps_time = perf_counter()
-            print('infer step  time ', end_iterate_inference_steps_time-start_iterate_inference_steps_time)
-            print_time_now('')
+            # end_iterate_inference_steps_time = perf_counter()
+            # print('infer step  time ', end_iterate_inference_steps_time-start_iterate_inference_steps_time)
+            # print_time_now('')
         except Exception:
             logger.warning("rpc_inference._iterate_inference_steps() exception:", exc_info=True)
             raise
@@ -659,7 +659,7 @@ class TransformerConnectionHandler(ConnectionHandler):
 
         backend = self.module_backends[request.uid] if request.uid else next(iter(self.module_backends.values()))
         result = {
-            "version": petals.__version__,
+            "version": bloombee.__version__,
             "dht_client_mode": self.dht.client_mode,
             CACHE_TOKENS_AVAILABLE: backend.memory_cache.bytes_left // max(backend.cache_bytes_per_token.values()),
         }

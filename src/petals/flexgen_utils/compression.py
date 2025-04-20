@@ -3,10 +3,10 @@ import dataclasses
 import torch
 import numpy as np
 
-from flexgen.pytorch_backend import (TorchTensor, TorchDevice,
-    DeviceType, general_copy, fix_recursive_import)
-from flexgen.utils import np_dtype_to_torch_dtype
-
+from bloombee.flexgen_utils.pytorch_backend import (TorchTensor, TorchDevice,
+    TorchDisk, TorchMixedDevice)
+from bloombee.flexgen_utils.utils import np_dtype_to_torch_dtype
+from bloombee.flexgen_utils.DeviceType import DeviceType
 
 @dataclasses.dataclass
 class CompressionConfig:
@@ -360,6 +360,5 @@ def test_real_compression():
 
 
 if __name__ == "__main__":
-    fix_recursive_import()
     #test_simulated_compression()
     test_real_compression()

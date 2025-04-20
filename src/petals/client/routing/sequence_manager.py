@@ -19,14 +19,14 @@ from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 
-from petals.client.config import ClientConfig
-from petals.client.routing.sequence_info import RemoteSequenceInfo
-from petals.client.routing.spending_policy import NoSpendingPolicy
-from petals.data_structures import ModuleUID, RemoteSpanInfo, ServerState
-from petals.server.handler import TransformerConnectionHandler
-from petals.utils.dht import get_remote_module_infos
-from petals.utils.ping import PingAggregator
-from petals.utils.random import sample_up_to
+from bloombee.client.config import ClientConfig
+from bloombee.client.routing.sequence_info import RemoteSequenceInfo
+from bloombee.client.routing.spending_policy import NoSpendingPolicy
+from bloombee.data_structures import ModuleUID, RemoteSpanInfo, ServerState
+from bloombee.server.handler import TransformerConnectionHandler
+from bloombee.utils.dht import get_remote_module_infos
+from bloombee.utils.ping import PingAggregator
+from bloombee.utils.random import sample_up_to
 
 logger = get_logger(__name__)
 

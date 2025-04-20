@@ -10,9 +10,9 @@ from torch import Tensor
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation.utils import ModelOutput
 
-from petals.client.inference_session import InferenceSession
-from petals.client.remote_sequential import RemoteSequential
-from petals.utils.misc import DUMMY, docstring_from
+from bloombee.client.inference_session import InferenceSession
+from bloombee.client.remote_sequential import RemoteSequential
+from bloombee.utils.misc import DUMMY, docstring_from
 
 logger = get_logger(__name__)
 

@@ -13,13 +13,28 @@ from tensor_parallel import TensorParallel
 from tensor_parallel.tensor_parallel import PerDeviceTensors
 from transformers import PretrainedConfig
 
-from petals.data_structures import InferenceMetadata
-from petals.server.memory_cache import MemoryCache
-from petals.server.task_pool import PrioritizedTaskPool
-from petals.utils.misc import get_size_in_bytes, is_dummy
+from bloombee.data_structures import InferenceMetadata
+from bloombee.server.memory_cache import MemoryCache
+from bloombee.server.task_pool import PrioritizedTaskPool
+from bloombee.utils.misc import get_size_in_bytes, is_dummy
 
 logger = get_logger(__name__)
+from pynvml import *
 
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
 
 class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Module
     """A wrapper for a transformer block that can process requests for forward, backward and inference"""
@@ -35,7 +50,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
         max_chunk_size_bytes: int,
         **kwargs,
     ):
-        import petals.utils.peft as _peft_module
+        import bloombee.utils.peft as _peft_module
 
         self._peft_module = _peft_module
 
@@ -85,6 +100,29 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
         for descr in self.get_inference_cache_descriptors(batch_size=1, max_length=1):
             self.cache_bytes_per_token[descr.device] += descr.numel() * get_size_in_bytes(descr.dtype)
 
+        # 创建 CPU 设备列表
+        num_cpus = 1  # 可以根据需要调整
+        cpus = [torch.device('cpu') for _ in range(num_cpus)]
+        
+        # 设置 TensorParallel 模块使用 CPU 设备
+        self.module.devices = cpus
+        
+        # 如果模块有 module_shards，将它们移动到 CPU
+        if hasattr(self.module, 'module_shards'):
+            for shard in self.module.module_shards:
+                shard.to('cpu')
+        
+        # 设置输出设备为 CPU
+        if hasattr(self.module, 'output_device_index'):
+            self.module.output_device_index = 0  # 使用第一个 CPU 作为输出设备
+        
+        # 标记需要延迟初始化
+        self.module.need_delayed_init = True
+        
+        # 记录原始设备，以便在需要时恢复
+        self.original_devices = self.module.devices
+        self.original_output_device_index = self.module.output_device_index
+
     def get_inference_cache_descriptors(self, batch_size: int, max_length: int) -> Sequence[TensorDescriptor]:
         """Create tensor descriptors for attention cache tensors used during inference_step"""
         head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -101,12 +139,32 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
     def forward(self, *inputs: Union[torch.Tensor, str]) -> Tuple[torch.Tensor, ...]:
         *inputs, active_adapter = inputs
         with self._peft_module.using_adapter(active_adapter):
+            # 在 forward 之前，确保模型在正确的设备上
+            self._ensure_model_on_device()
             return super().forward(*inputs)
 
     def backward(self, *inputs: Union[torch.Tensor, str]) -> Tuple[torch.Tensor, ...]:
         *inputs, active_adapter = inputs
         with self._peft_module.using_adapter(active_adapter):
+            # 在 backward 之前，确保模型在正确的设备上
+            self._ensure_model_on_device()
             return super().backward(*inputs)
+
+    def _ensure_model_on_device(self):
+        """确保模型在正确的设备上，如果需要，从 CPU 加载到 GPU"""
+        # 检查当前设备是否与原始设备不同
+        if self.module.devices != self.original_devices:
+            # 将模型移动到原始设备
+            self.module.devices = self.original_devices
+            self.module.output_device_index = self.original_output_device_index
+            
+            # 如果模块有 module_shards，将它们移动到原始设备
+            if hasattr(self.module, 'module_shards'):
+                for shard, device in zip(self.module.module_shards, self.original_devices):
+                    shard.to(device)
+            
+            # 标记需要延迟初始化
+            self.module.need_delayed_init = True
 
     @torch.inference_mode() # 进入推理模式，不计算梯度，从而节省内存 
     def inference_step( # 每一个block都会执行一次, 
@@ -117,7 +175,12 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
     ) -> Tuple[torch.Tensor, ...]:
         assert hidden_states.ndim == 3, "expected hidden states to be 3-dimensional: [batch_size, seq_len, hid_size]" # 确保隐藏状态是三维的 
         seq_len = hidden_states.shape[1] # 获取序列的长度 
-        print("transformer backend inference step : seq_len", seq_len)
+        # print("transformer backend inference step : seq_len", seq_len)
+        see_memory_usage("transformer backend inference step : seq_len")
+        
+        # 在推理之前，确保模型在正确的设备上
+        self._ensure_model_on_device()
+        
         with self.memory_cache.use_cache(
             *inference_info.cache_handles  # 使用缓存，降低内存需求  
         ) as cache_tensors, self._peft_module.using_adapter(inference_info.active_adapter): # 使用adapter进行推理  
@@ -128,6 +191,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
             # is at least 4-6x less than `autograd_memory`.
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info) # 估计最大分块长度 
             print("transformer backend inference step() : max_chunk_length", max_chunk_length)
+            see_memory_usage("transformer backend inference step : seq_len")
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None # 初始化输出状态
             # print("transformer backend inference step : output_hidden_states", output_hidden_states) # output_hidden_states:None
             layer_past = self._select_layer_past(cache_tensors, inference_info.prefix_length) # 选择上一个层的缓存状态 
@@ -138,9 +202,13 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # output_hidden_states_chunk, new_kvs = self.module.forward(
                 #     hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
                 # )
+                # import pdb;pdb.set_trace()
+                see_memory_usage("----before -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
                 output_hidden_states_chunk,= self.module.forward(
                     hidden_states_chunk, layer_past=layer_past, use_cache=False # 前向传播，返回新的键值状态  
                 )
+                see_memory_usage("----after -transformer backend inference step output_hidden_states_chunk,= self.module.forward(")
+                
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk # 存储输出
                 else:
@@ -148,8 +216,8 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 # layer_past = new_kvs # 更新缓存状态
 
             # self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length) # 更新缓存 
-            # import pdb;pdb.set_trace()
-            print('backend.py output_hidden_states ', output_hidden_states)
+            # import pdb; pdb.set_trace()
+            print('backend.py output_hidden_states.shape ', output_hidden_states.shape)
             return (output_hidden_states,) # 返回输出的隐藏状态
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:

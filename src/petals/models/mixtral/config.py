@@ -5,10 +5,10 @@ from hivemind import get_logger
 from transformers.models.mixtral import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralAttention
 
-from petals.client.config import ClientConfig
-from petals.client.lm_head import LMHeadConfig
-from petals.client.ptune import PTuneConfig
-from petals.models.mixtral.block import WrappedMixtralBlock
+from bloombee.client.config import ClientConfig
+from bloombee.client.lm_head import LMHeadConfig
+from bloombee.client.ptune import PTuneConfig
+from bloombee.models.mixtral.block import WrappedMixtralBlock
 
 logger = get_logger(__name__)
 

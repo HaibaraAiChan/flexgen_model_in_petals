@@ -6,13 +6,13 @@ import requests
 from hivemind.utils.logging import TextStyle, get_logger
 from packaging.version import parse
 
-import petals
+import bloombee
 
 logger = get_logger(__name__)
 
 
 def validate_version() -> None:
-    logger.info(f"Running {TextStyle.BOLD}Petals {petals.__version__}{TextStyle.RESET}")
+    logger.info(f"Running {TextStyle.BOLD}Petals {bloombee.__version__}{TextStyle.RESET}")
     try:
         r = requests.get("https://pypi.python.org/pypi/petals/json")
         r.raise_for_status()
@@ -21,7 +21,7 @@ def validate_version() -> None:
         versions = [parse(ver) for ver in response.get("releases")]
         latest = max(ver for ver in versions if not ver.is_prerelease)
 
-        if parse(petals.__version__) < latest:
+        if parse(bloombee.__version__) < latest:
             logger.info(
                 f"A newer version {latest} is available. Please upgrade with: "
                 f"{TextStyle.BOLD}pip install --upgrade petals{TextStyle.RESET}"

@@ -13,16 +13,16 @@ import torch.mps
 from hivemind.utils.logging import get_logger
 from transformers import PretrainedConfig
 
-from petals.server.block_utils import get_model_block, resolve_block_dtype
-from petals.utils.convert_block import QuantType, convert_block
-from petals.utils.disk_cache import DEFAULT_CACHE_DIR
-from petals.utils.misc import DUMMY_KEY_PAST
+from bloombee.server.block_utils import get_model_block, resolve_block_dtype
+from bloombee.utils.convert_block import QuantType, convert_block
+from bloombee.utils.disk_cache import DEFAULT_CACHE_DIR
+from bloombee.utils.misc import DUMMY_KEY_PAST
 
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d
 
 
 logger = get_logger(__name__)

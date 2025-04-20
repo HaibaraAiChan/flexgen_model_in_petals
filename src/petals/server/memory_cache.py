@@ -16,9 +16,9 @@ import async_timeout
 import torch
 from hivemind.utils import TensorDescriptor, enter_asynchronously, get_logger
 
-from petals.data_structures import Handle
-from petals.utils.asyncio import shield_and_wait
-from petals.utils.misc import get_size_in_bytes
+from bloombee.data_structures import Handle
+from bloombee.utils.asyncio import shield_and_wait
+from bloombee.utils.misc import get_size_in_bytes
 
 logger = get_logger(__name__)
 

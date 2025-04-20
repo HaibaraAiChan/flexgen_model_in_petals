@@ -14,12 +14,12 @@ from hivemind.p2p import P2P
 from hivemind.proto import runtime_pb2
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 
-from petals.client.config import ClientConfig
-from petals.client.routing import RemoteSequenceManager, maybe_log_traceback
-from petals.data_structures import CHAIN_DELIMITER, ModuleUID, RemoteSpanInfo, RPCInfo
-from petals.server.handler import TransformerConnectionHandler
-from petals.utils.misc import DUMMY, DUMMY_INT64, is_dummy
-from petals.utils.packaging import pack_args_kwargs
+from bloombee.client.config import ClientConfig
+from bloombee.client.routing import RemoteSequenceManager, maybe_log_traceback
+from bloombee.data_structures import CHAIN_DELIMITER, ModuleUID, RemoteSpanInfo, RPCInfo
+from bloombee.server.handler import TransformerConnectionHandler
+from bloombee.utils.misc import DUMMY, DUMMY_INT64, is_dummy
+from bloombee.utils.packaging import pack_args_kwargs
 
 logger = get_logger(__name__)
 

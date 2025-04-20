@@ -14,7 +14,7 @@ from hivemind.p2p import P2P, P2PContext, PeerID, ServicerBase
 from hivemind.proto import dht_pb2
 from hivemind.utils import get_logger
 
-from petals.constants import REACHABILITY_API_URL
+from bloombee.constants import REACHABILITY_API_URL
 
 logger = get_logger(__name__)
 

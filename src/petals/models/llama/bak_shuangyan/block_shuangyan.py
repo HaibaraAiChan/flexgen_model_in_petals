@@ -23,16 +23,16 @@ from transformers.models.llama.modeling_llama import (
 
 
 import numpy as np
-from petals.utils.cuda_graphs import make_inference_graphed_callable
+from bloombee.utils.cuda_graphs import make_inference_graphed_callable
 # from petals.flexgen_utils.utils import ExecutionEnv
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor, TorchDevice
-from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
-from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
-from petals.models.llama.llama_config import get_llama_config
-from petals.flexgen_utils.task import Task
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor, TorchDevice
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
+from bloombee.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
+from bloombee.flexgen_utils.llama_config import get_llama_config
+from bloombee.flexgen_utils.task import Task
 from transformers import AutoTokenizer
 import os
 

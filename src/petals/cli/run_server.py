@@ -8,10 +8,10 @@ from hivemind.utils import limits
 from hivemind.utils.logging import get_logger
 from humanfriendly import parse_size
 
-from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-from petals.server.server import Server
-from petals.utils.convert_block import QuantType
-from petals.utils.version import validate_version
+from bloombee.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+from bloombee.server.server import Server
+from bloombee.utils.convert_block import QuantType
+from bloombee.utils.version import validate_version
 
 logger = get_logger(__name__)
 

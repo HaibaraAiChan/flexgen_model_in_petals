@@ -5,11 +5,11 @@ from hivemind import get_logger
 from transformers.models.falcon import FalconConfig
 from transformers.models.falcon.modeling_falcon import FalconAttention
 
-from petals.client.config import ClientConfig
-from petals.client.lm_head import LMHeadConfig
-from petals.client.ptune import PTuneConfig
-from petals.models.falcon.block import WrappedFalconBlock
-from petals.utils.auto_config import DefaultRevisionMixin
+from bloombee.client.config import ClientConfig
+from bloombee.client.lm_head import LMHeadConfig
+from bloombee.client.ptune import PTuneConfig
+from bloombee.models.falcon.block import WrappedFalconBlock
+from bloombee.utils.auto_config import DefaultRevisionMixin
 
 logger = get_logger(__name__)
 

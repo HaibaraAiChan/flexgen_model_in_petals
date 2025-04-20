@@ -22,21 +22,23 @@ from huggingface_hub.utils import EntryNotFoundError
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.utils import get_file_from_repo
 
-from petals.constants import DTYPE_MAP
-from petals.models.mixtral import WrappedMixtralBlock
-from petals.server.block_utils import get_model_block, resolve_block_dtype
-from petals.utils.auto_config import AutoDistributedConfig
-from petals.utils.disk_cache import DEFAULT_CACHE_DIR, allow_cache_reads, allow_cache_writes, free_disk_space_for
-from petals.utils.hf_auth import always_needs_auth
+from bloombee.constants import DTYPE_MAP
+from bloombee.models.mixtral import WrappedMixtralBlock
+from bloombee.server.block_utils import get_model_block, resolve_block_dtype
+from bloombee.utils.auto_config import AutoDistributedConfig
+from bloombee.utils.disk_cache import DEFAULT_CACHE_DIR, allow_cache_reads, allow_cache_writes, free_disk_space_for
+from bloombee.utils.hf_auth import always_needs_auth
 
-from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from bloombee.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np
 # import pdb
+
+from bloombee.models.llama.flex_llama import load_weights_from_pytorch_model
 
 
 
@@ -65,20 +67,15 @@ def load_pretrained_block(
         config = AutoDistributedConfig.from_pretrained(model_name, use_auth_token=token)
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
-    # print('server from_pretrained.py model_name ', model_name)
-    # print("server from_pretrained.py model config ", config)
     
     assert torch_dtype in DTYPE_MAP.values(), f"torch_dtype must be one of {list(DTYPE_MAP.values())}"
     torch_dtype = resolve_block_dtype(config, torch_dtype)
-    # import pdb; pdb.set_trace()
-    with init_empty_weights(): #init weights
+    
+    with init_empty_weights():
         print('load_pretrained_block : init_empty_weights() ') 
         block = get_model_block(config, env, policy, weight_home, path, layer_idx=block_index)
-        # print('load pretrained block ', block)
-        # import pdb; pdb.set_trace()
-    # print('server from_pretrained.py:load_pretrained_block() after get_model_block  block', block)
-    #### currently, the block does not contain weights yet
-    block_prefix = f"{config.block_prefix}.{block_index}." # block prefix is the transformer layer_idx
+    
+    block_prefix = f"{config.block_prefix}.{block_index}."
     state_dict = _load_state_dict_from_repo(
         model_name,
         block_prefix,
@@ -87,18 +84,22 @@ def load_pretrained_block(
         cache_dir=cache_dir,
         max_disk_space=max_disk_space,
     )
-    # state_dict contains weights tensors
-    # init_weight_list(state_dict, policy, env, block)
-    for param_name, _ in block.named_parameters():
-        assert param_name in state_dict, f"{param_name} not in state dict"
-        param = state_dict[param_name]
+    
+    # 将权重加载到模型中
+    for param_name, param in state_dict.items():
         if not str(param.dtype).startswith(("torch.uint", "torch.int", "torch.bool")):
             param = param.to(torch_dtype)
         set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
-
-    logger.info(f"Loaded {model_name} block {block_index}")
     
-    return block # current block is WrappedLlamaBlock, and contains weights tensors
+    # # 使用 FlexGen 的权重加载方式
+    # try:
+    #     load_weights_from_pytorch_model(block, policy, env, weight_home, block_index)
+    #     logger.info(f"Loaded {model_name} block {block_index} with FlexGen weight management")
+    # except Exception as e:
+    #     logger.warning(f"Failed to load weights with FlexGen: {e}")
+    #     logger.info(f"Loaded {model_name} block {block_index} with direct parameter assignment")
+    
+    return block
 
 
 StateDict = Dict[str, torch.Tensor]

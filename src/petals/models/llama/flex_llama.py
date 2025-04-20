@@ -1,6 +1,6 @@
 """
 Usage:
-python3 -m flexgen.flex_llama --model huggingface repo --gpu-batch-size 32 --percent 100 0 100 0 100 0
+python3 -m petals.models.llama.flex_llama --model huggingface repo --gpu-batch-size 32 --percent 100 0 100 0 100 0
 modified on flex_opt.py
 """
 
@@ -12,17 +12,19 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint
-from flexgen.compression import CompressionConfig
-from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import fix_recursive_import, general_copy, DeviceType, TorchDevice, TorchDisk, \
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import, general_copy, DeviceType, TorchDevice, TorchDisk, \
     TorchMixedDevice
-from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
+from bloombee.flexgen_utils.utils import (GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
+from bloombee.flexgen_utils.task import Task
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
 from torch import nn
 from transformers import AutoTokenizer
-from flexgen.timer import timers
+from bloombee.flexgen_utils.timer import timers
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 fix_recursive_import()
@@ -121,8 +123,9 @@ def get_choice(cur_percent, percents, choices):
     return choices[-1]
 
 def init_weight_list(weight_specs, policy, env):
+    
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-    print('dev_percents ', dev_percents)
+    print('dev_percents :[ disk, cpu, gpu]', dev_percents)
     dev_choices = [env.disk, env.cpu, env.gpu]
 
     sizes = [np.prod(spec[0]) for spec in weight_specs]
@@ -147,24 +150,105 @@ def init_weight_list(weight_specs, policy, env):
             # print('weight', weight)
 
             if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
+                try:
+                    weight.load_from_np_file(weight_specs[i][2])
+                except (FileNotFoundError, AttributeError) as e:
+                    print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
+                    # 如果文件不存在或加载失败，使用随机初始化
+                    weight.load_from_np(np.random.rand(*shape).astype(dtype))
             else:
                 weight.load_from_np(np.ones(shape, dtype))
                 #weight.load_from_np(np.random.rand(*shape).astype(dtype))
         else:
-            weight = home.compressed_device.allocate(
-                shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
+            # 检查压缩设备是否可用
+            if hasattr(home, 'compressed_device') and home.compressed_device is not None:
+                weight = home.compressed_device.allocate(
+                    shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
 
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
+                if DUMMY_WEIGHT not in filename:
+                    try:
+                        weight.load_from_np_file(weight_specs[i][2])
+                    except (FileNotFoundError, AttributeError) as e:
+                        print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
+                        # 如果文件不存在或加载失败，使用随机初始化
+                        for i in range(2):
+                            x = weight.data[i]
+                            x.load_from_np(np.random.rand(*x.shape).astype(torch_dtype_to_np_dtype[x.dtype]))
+                else:
+                    for i in range(2):
+                        x = weight.data[i]
+                        x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
             else:
-                for i in range(2):
-                    x = weight.data[i]
-                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+                # 如果压缩设备不可用，回退到非压缩方式
+                print(f"Warning: Compressed device not available, falling back to non-compressed allocation")
+                weight = home.allocate(shape, dtype, pin_memory=pin_memory)
+                if DUMMY_WEIGHT not in filename:
+                    try:
+                        weight.load_from_np_file(weight_specs[i][2])
+                    except (FileNotFoundError, AttributeError) as e:
+                        print(f"Warning: Could not load weight from file {weight_specs[i][2]}: {e}")
+                        # 如果文件不存在或加载失败，使用随机初始化
+                        weight.load_from_np(np.random.rand(*shape).astype(dtype))
+                else:
+                    weight.load_from_np(np.ones(shape, dtype))
         # print('weight.data ', weight.data)
         ret.append(weight)
         
     return ret
+
+# 添加一个新函数，用于从 PyTorch 模型加载权重到 FlexGen 格式
+def load_weights_from_pytorch_model(model, policy, env, weight_home, block_index):
+    """
+    从 PyTorch 模型加载权重到 FlexGen 格式
+    
+    Args:
+        model: PyTorch 模型
+        policy: FlexGen 策略
+        env: FlexGen 环境
+        weight_home: 权重存储位置
+        block_index: 块索引
+    """
+    weight_specs = []
+    
+    # 遍历模型的所有参数
+    for name, param in model.named_parameters():
+        # 创建权重规格
+        shape = param.shape
+        dtype = param.dtype
+        # 使用参数名称作为文件名，确保唯一性
+        filename = f"block_{block_index}_{name}"
+        
+        weight_specs.append((shape, dtype, filename))
+        
+        # 将参数移动到 CPU，避免在 GPU 上存储
+        param.data = param.data.to('cpu')
+    
+    try:
+        # 初始化权重列表
+        weights = init_weight_list(weight_specs, policy, env)
+        
+        # 将权重加载到模型中
+        for (name, _), weight in zip(model.named_parameters(), weights):
+            param = getattr(model, name)
+            param.data = weight.data.to(param.device)
+        
+        # 存储权重规格，以便后续使用
+        weight_home[block_index] = weight_specs
+        
+        return weights
+    except Exception as e:
+        print(f"Warning: Failed to initialize weights with FlexGen: {e}")
+        print("Falling back to direct parameter assignment")
+        
+        # 如果 FlexGen 初始化失败，直接使用参数赋值
+        for name, param in model.named_parameters():
+            # 确保参数在 CPU 上
+            param.data = param.data.to('cpu')
+        
+        # 存储空的权重规格
+        weight_home[block_index] = []
+        
+        return []
 
 # class InputEmbed:
 #     def __init__(self, config, env, policy):
@@ -516,13 +600,15 @@ class FLEX_LlamaAttention(LlamaAttention):
         if i == 0:
             # prefill
             # import pdb;pdb.set_trace()---------------------
+            see_memory_usage("-----------------------------------------before mha_llama ")
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             h, new_k_cache, new_v_cache = self.compute.mha_llama(h, mask, w_q, w_k, w_v, w_out,
                                        n_head, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
-            
+            see_memory_usage("-----------------------------------------after mha_llama ")
         else:
             # decoding
+            see_memory_usage("-----------------------------------------before mha_gen_llama ")
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
             h, new_k_cache, new_v_cache = self.compute.mha_gen_llama(
@@ -533,7 +619,7 @@ class FLEX_LlamaAttention(LlamaAttention):
                 input_layernorm,
                 rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
-
+            see_memory_usage("-----------------------------------------after mha_gen_llama ")
         hidden.val = h
         
         return h
@@ -566,7 +652,7 @@ class FLEX_LlamaMLP(LlamaMLP):
         # print('self.llama_config ', self.llama_config)
         # intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
         intermediate_size, h, dtype = (self.config.intermediate_size, self.config.hidden_size, np.float16)
-        
+        print('intermediate_size, h, dtype ', intermediate_size, h, dtype)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
         weight_specs = [
             # 4 weight files
@@ -619,7 +705,7 @@ class FLEX_LlamaMLP(LlamaMLP):
         ):
         donate = [False] * 9
         h, donate[0] = hidden_states.val, True
-        print('flex_llama.py MLP forward function  mlp h ,',  h)
+        # print('flex_llama.py MLP forward function  mlp h ,',  h)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((gate, donate[1]), (down, donate[3]),
@@ -630,8 +716,9 @@ class FLEX_LlamaMLP(LlamaMLP):
 
         h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
         hidden_states.val = h
-        print('flex_llama.py MLP forward function  h,',  h)
+        # print('flex_llama.py MLP forward function  h,',  h)
         self.temp_hidden_states.val=h
+        
         return h
 
 

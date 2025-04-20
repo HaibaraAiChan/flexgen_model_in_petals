@@ -14,8 +14,8 @@ from hivemind.utils.asyncio import aiter_with_timeout, iter_as_aiter
 from hivemind.utils.streaming import split_for_streaming
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 
-from petals.client.config import ClientConfig
-from petals.data_structures import ModuleUID, RPCInfo
+from bloombee.client.config import ClientConfig
+from bloombee.data_structures import ModuleUID, RPCInfo
 
 
 async def _forward_unary(

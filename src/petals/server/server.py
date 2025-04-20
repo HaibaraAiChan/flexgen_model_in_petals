@@ -21,30 +21,30 @@ from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.logging import get_logger
 from transformers import PretrainedConfig
 
-import petals
-from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-from petals.data_structures import CHAIN_DELIMITER, UID_DELIMITER, ModelInfo, ServerInfo, ServerState, parse_uid
-from petals.server import block_selection
-from petals.server.backend import TransformerBackend, merge_inference_pools_inplace
-from petals.server.block_utils import get_block_size, resolve_block_dtype
-from petals.server.from_pretrained import load_pretrained_block
-from petals.server.handler import TransformerConnectionHandler
-from petals.server.memory_cache import MemoryCache
-from petals.server.reachability import ReachabilityProtocol, check_direct_reachability, validate_reachability
-from petals.server.throughput import get_dtype_name, get_server_throughput
-from petals.utils.auto_config import AutoDistributedConfig
-from petals.utils.convert_block import QuantType, check_device_balance, convert_block
-from petals.utils.dht import declare_active_modules, get_remote_module_infos
-from petals.utils.misc import get_size_in_bytes
-from petals.utils.ping import PingAggregator
-from petals.utils.random import sample_up_to
-from petals.utils.version import get_compatible_model_repo
+import bloombee
+from bloombee.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+from bloombee.data_structures import CHAIN_DELIMITER, UID_DELIMITER, ModelInfo, ServerInfo, ServerState, parse_uid
+from bloombee.server import block_selection
+from bloombee.server.backend import TransformerBackend, merge_inference_pools_inplace
+from bloombee.server.block_utils import get_block_size, resolve_block_dtype
+from bloombee.server.from_pretrained import load_pretrained_block
+from bloombee.server.handler import TransformerConnectionHandler
+from bloombee.server.memory_cache import MemoryCache
+from bloombee.server.reachability import ReachabilityProtocol, check_direct_reachability, validate_reachability
+from bloombee.server.throughput import get_dtype_name, get_server_throughput
+from bloombee.utils.auto_config import AutoDistributedConfig
+from bloombee.utils.convert_block import QuantType, check_device_balance, convert_block
+from bloombee.utils.dht import declare_active_modules, get_remote_module_infos
+from bloombee.utils.misc import get_size_in_bytes
+from bloombee.utils.ping import PingAggregator
+from bloombee.utils.random import sample_up_to
+from bloombee.utils.version import get_compatible_model_repo
 
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d
 from pynvml import *
 
 def see_memory_usage(message, force=True):
@@ -259,14 +259,14 @@ class Server:
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
                     0, 100,              # w_gpu_percent: float, w_cpu_percent: float
                     0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float
-                    100, 0,             # act_gpu_percent: float, act_cpu_percent: float
+                    0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=False,
+                    compress_weight=False,  # 暂时禁用权重压缩，避免 compressed_device 问题
                     comp_weight_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=0, symmetric=False),
-                    compress_cache=False,
+                    compress_cache=False,  # 暂时禁用缓存压缩
                     comp_cache_config=CompressionConfig(
                         num_bits=4, group_size=64,
                         group_dim=2, symmetric=False))
@@ -304,7 +304,7 @@ class Server:
         self.server_info = ServerInfo(
             state=ServerState.JOINING,
             public_name=public_name,
-            version=petals.__version__,
+            version=bloombee.__version__,
             adapters=tuple(adapters),
             torch_dtype=str(torch_dtype).replace("torch.", ""),
             quant_type=quant_type.name.lower(),
@@ -354,7 +354,7 @@ class Server:
         total_memory_per_block = block_size + self._cache_bytes_per_block
         if self.adapters:
             # Delay import of petals.utils.peft to avoid unnecessary import of bitsandbytes
-            from petals.utils.peft import estimate_adapter_memory_per_block
+            from bloombee.utils.peft import estimate_adapter_memory_per_block
 
             total_memory_per_block += estimate_adapter_memory_per_block(
                 self.block_config,

@@ -5,7 +5,7 @@ from typing import Optional, Type, Union
 from hivemind import get_logger
 from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
 
-from petals.utils.hf_auth import always_needs_auth
+from bloombee.utils.hf_auth import always_needs_auth
 
 logger = get_logger(__name__)
 

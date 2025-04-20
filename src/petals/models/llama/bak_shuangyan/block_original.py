@@ -20,7 +20,7 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
-from petals.utils.cuda_graphs import make_inference_graphed_callable
+from bloombee.utils.cuda_graphs import make_inference_graphed_callable
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):

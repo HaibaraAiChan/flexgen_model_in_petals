@@ -83,7 +83,7 @@ def convert_block(
     print('adapters ', adapters )
     if adapters:
         
-        from petals.utils.peft import add_adapter_to_block, create_lora_adapter, load_peft
+        from bloombee.utils.peft import add_adapter_to_block, create_lora_adapter, load_peft
 
         create_lora_adapter(block)
         for adapter_name in adapters:
