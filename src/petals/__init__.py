@@ -12,10 +12,10 @@ import hivemind
 import transformers
 from packaging import version
 
-from petals.client import *
-from petals.models import *
-from petals.utils import *
-from petals.utils.logging import initialize_logs as _initialize_logs
+from bloombee.client import *
+from bloombee.models import *
+from bloombee.utils import *
+from bloombee.utils.logging import initialize_logs as _initialize_logs
 
 __version__ = "2.3.0.dev2"
 

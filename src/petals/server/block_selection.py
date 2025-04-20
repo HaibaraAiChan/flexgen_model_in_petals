@@ -3,8 +3,8 @@ from typing import Dict, List
 import numpy as np
 from hivemind import PeerID, get_logger
 
-from petals.data_structures import RemoteModuleInfo, RemoteSpanInfo, ServerState
-from petals.utils.dht import compute_spans
+from bloombee.data_structures import RemoteModuleInfo, RemoteSpanInfo, ServerState
+from bloombee.utils.dht import compute_spans
 
 logger = get_logger(__name__)
 

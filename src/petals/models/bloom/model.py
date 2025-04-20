@@ -8,12 +8,12 @@ from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from transformers.models.bloom import BloomForCausalLM, BloomForSequenceClassification, BloomModel, BloomPreTrainedModel
 
-from petals.client.from_pretrained import FromPretrainedMixin
-from petals.client.lm_head import LMHead
-from petals.client.ptune import PTuneMixin
-from petals.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
-from petals.client.remote_sequential import RemoteSequential
-from petals.models.bloom.config import DistributedBloomConfig
+from bloombee.client.from_pretrained import FromPretrainedMixin
+from bloombee.client.lm_head import LMHead
+from bloombee.client.ptune import PTuneMixin
+from bloombee.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
+from bloombee.client.remote_sequential import RemoteSequential
+from bloombee.models.bloom.config import DistributedBloomConfig
 
 logger = get_logger(__name__)
 

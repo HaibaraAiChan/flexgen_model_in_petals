@@ -4,8 +4,8 @@ from typing import Iterable, List, Optional, Tuple
 
 from hivemind import get_logger
 
-from petals.data_structures import ModuleUID, RemoteModuleInfo, RemoteSpanInfo, ServerState
-from petals.utils.dht import compute_spans
+from bloombee.data_structures import ModuleUID, RemoteModuleInfo, RemoteSpanInfo, ServerState
+from bloombee.utils.dht import compute_spans
 
 logger = get_logger(__name__)
 

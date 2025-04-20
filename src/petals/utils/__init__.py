@@ -1,8 +1,8 @@
-from petals.utils.auto_config import (
+from bloombee.utils.auto_config import (
     AutoDistributedConfig,
     AutoDistributedModel,
     AutoDistributedModelForCausalLM,
     AutoDistributedModelForSequenceClassification,
     AutoDistributedSpeculativeModel,
 )
-from petals.utils.dht import declare_active_modules, get_remote_module_infos
+from bloombee.utils.dht import declare_active_modules, get_remote_module_infos

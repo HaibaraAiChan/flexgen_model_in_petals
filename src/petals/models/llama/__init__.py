@@ -1,12 +1,12 @@
-from petals.models.llama.block import WrappedLlamaBlock
-from petals.models.llama.config import DistributedLlamaConfig
-from petals.models.llama.model import (
+from bloombee.models.llama.block import WrappedLlamaBlock
+from bloombee.models.llama.config import DistributedLlamaConfig
+from bloombee.models.llama.model import (
     DistributedLlamaForCausalLM,
     DistributedLlamaForSequenceClassification,
     DistributedLlamaModel,
 )
-from petals.models.llama.speculative_model import DistributedLlamaForSpeculativeGeneration
-from petals.utils.auto_config import register_model_classes
+from bloombee.models.llama.speculative_model import DistributedLlamaForSpeculativeGeneration
+from bloombee.utils.auto_config import register_model_classes
 
 register_model_classes(
     config=DistributedLlamaConfig,

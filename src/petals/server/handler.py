@@ -31,12 +31,12 @@ from hivemind.utils.asyncio import amap_in_executor, anext
 from hivemind.utils.logging import get_logger
 from hivemind.utils.streaming import split_for_streaming
 
-import petals
-from petals.data_structures import CHAIN_DELIMITER, UID_DELIMITER, Handle, ModuleUID
-from petals.server.backend import TransformerBackend
-from petals.server.block_functions import iterate_rpc_inference, run_rpc_backward, run_rpc_forward
-from petals.server.task_prioritizer import DummyTaskPrioritizer, TaskPrioritizerBase
-from petals.utils.convert_block import QuantType
+import bloombee
+from bloombee.data_structures import CHAIN_DELIMITER, UID_DELIMITER, Handle, ModuleUID
+from bloombee.server.backend import TransformerBackend
+from bloombee.server.block_functions import iterate_rpc_inference, run_rpc_backward, run_rpc_forward
+from bloombee.server.task_prioritizer import DummyTaskPrioritizer, TaskPrioritizerBase
+from bloombee.utils.convert_block import QuantType
 
 logger = get_logger(__name__)
 
@@ -659,7 +659,7 @@ class TransformerConnectionHandler(ConnectionHandler):
 
         backend = self.module_backends[request.uid] if request.uid else next(iter(self.module_backends.values()))
         result = {
-            "version": petals.__version__,
+            "version": bloombee.__version__,
             "dht_client_mode": self.dht.client_mode,
             CACHE_TOKENS_AVAILABLE: backend.memory_cache.bytes_left // max(backend.cache_bytes_per_token.values()),
         }

@@ -12,13 +12,13 @@ from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 from hivemind.utils.nested import nested_flatten
 
-from petals.data_structures import Handle, InferenceMetadata
-from petals.server.backend import TransformerBackend
-from petals.server.task_pool import PrioritizedTaskPool
-from petals.server.task_prioritizer import TaskPrioritizerBase
-from petals.utils.convert_block import QuantType
-from petals.utils.misc import DUMMY, is_dummy
-from petals.utils.packaging import unpack_args_kwargs
+from bloombee.data_structures import Handle, InferenceMetadata
+from bloombee.server.backend import TransformerBackend
+from bloombee.server.task_pool import PrioritizedTaskPool
+from bloombee.server.task_prioritizer import TaskPrioritizerBase
+from bloombee.utils.convert_block import QuantType
+from bloombee.utils.misc import DUMMY, is_dummy
+from bloombee.utils.packaging import unpack_args_kwargs
 
 from time import perf_counter
 from datetime import datetime, timezone  

@@ -5,10 +5,10 @@ from hivemind import get_logger
 from transformers.models.bloom import BloomConfig
 from transformers.models.bloom.modeling_bloom import BloomAttention
 
-from petals.client.config import ClientConfig
-from petals.client.lm_head import LMHeadConfig
-from petals.client.ptune import PTuneConfig
-from petals.models.bloom.block import WrappedBloomBlock
+from bloombee.client.config import ClientConfig
+from bloombee.client.lm_head import LMHeadConfig
+from bloombee.client.ptune import PTuneConfig
+from bloombee.models.bloom.block import WrappedBloomBlock
 
 logger = get_logger(__name__)
 

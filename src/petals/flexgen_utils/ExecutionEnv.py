@@ -8,7 +8,7 @@ import math
 import os
 from typing import Tuple, Union, Optional, Any, Sequence, List
 # fix recursive import
-from petals.flexgen_utils.pytorch_backend import TorchDevice, TorchDisk, TorchMixedDevice
+from bloombee.flexgen_utils.pytorch_backend import TorchDevice, TorchDisk, TorchMixedDevice
 
 import numpy as np
 import torch

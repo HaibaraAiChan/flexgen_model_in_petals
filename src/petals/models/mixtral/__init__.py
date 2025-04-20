@@ -1,11 +1,11 @@
-from petals.models.mixtral.block import WrappedMixtralBlock
-from petals.models.mixtral.config import DistributedMixtralConfig
-from petals.models.mixtral.model import (
+from bloombee.models.mixtral.block import WrappedMixtralBlock
+from bloombee.models.mixtral.config import DistributedMixtralConfig
+from bloombee.models.mixtral.model import (
     DistributedMixtralForCausalLM,
     DistributedMixtralForSequenceClassification,
     DistributedMixtralModel,
 )
-from petals.utils.auto_config import register_model_classes
+from bloombee.utils.auto_config import register_model_classes
 
 register_model_classes(
     config=DistributedMixtralConfig,

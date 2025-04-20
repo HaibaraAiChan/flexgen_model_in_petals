@@ -6,4 +6,4 @@ warnings.warn(
     stacklevel=2,
 )
 
-from petals.utils.dht import *
+from bloombee.utils.dht import *

@@ -7,12 +7,12 @@ from hivemind.utils.logging import get_logger
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.llama import LlamaForCausalLM, LlamaForSequenceClassification, LlamaModel, LlamaPreTrainedModel
 
-from petals.client.from_pretrained import FromPretrainedMixin
-from petals.client.lm_head import LMHead
-from petals.client.ptune import PTuneMixin
-from petals.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
-from petals.client.remote_sequential import RemoteSequential
-from petals.models.llama.config import DistributedLlamaConfig
+from bloombee.client.from_pretrained import FromPretrainedMixin
+from bloombee.client.lm_head import LMHead
+from bloombee.client.ptune import PTuneMixin
+from bloombee.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
+from bloombee.client.remote_sequential import RemoteSequential
+from bloombee.models.llama.config import DistributedLlamaConfig
 
 logger = get_logger(__name__)
 

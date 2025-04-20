@@ -14,8 +14,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import sys
-from petals.flexgen_utils.DeviceType import DeviceType
-from petals.flexgen_utils.utils import (GB, T, cpu_mem_stats, vector_gather, torch_type, np_type,
+from bloombee.flexgen_utils.DeviceType import DeviceType
+from bloombee.flexgen_utils.utils import (GB, T, cpu_mem_stats, vector_gather, torch_type, np_type,
     np_dtype_to_torch_dtype, torch_dtype_to_np_dtype,
     torch_dtype_to_num_bytes)
 from torch import nn
@@ -29,7 +29,7 @@ global_disk_device = None
 
 def fix_recursive_import():
     global general_copy_compressed, TorchCompressedDevice, global_cpu_device
-    from petals.flexgen_utils import compression
+    from bloombee.flexgen_utils import compression
     general_copy_compressed = compression.general_copy_compressed
     TorchCompressedDevice = compression.TorchCompressedDevice
 from pynvml import *

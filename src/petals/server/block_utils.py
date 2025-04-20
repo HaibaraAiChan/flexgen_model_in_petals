@@ -4,14 +4,14 @@ import torch
 from accelerate import init_empty_weights
 from transformers import PretrainedConfig, PreTrainedModel
 
-from petals.models.mixtral.block import WrappedMixtralBlock
-from petals.utils.convert_block import QuantType
-from petals.utils.misc import get_size_in_bytes
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from bloombee.models.mixtral.block import WrappedMixtralBlock
+from bloombee.utils.convert_block import QuantType
+from bloombee.utils.misc import get_size_in_bytes
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d
 
 
 def resolve_block_dtype(config: PretrainedConfig, dtype: Union[str, torch.dtype]) -> torch.dtype:

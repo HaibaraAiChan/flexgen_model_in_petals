@@ -1,5 +1,5 @@
 import dataclasses
-from petals.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.compression import CompressionConfig
 @dataclasses.dataclass(frozen=True)
 class Policy:
     gpu_batch_size: int

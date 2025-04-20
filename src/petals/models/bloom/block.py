@@ -9,7 +9,7 @@ import torch
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.models.bloom.modeling_bloom import BloomBlock, build_alibi_tensor
 
-from petals.utils.misc import is_dummy
+from bloombee.utils.misc import is_dummy
 
 
 class WrappedBloomBlock(BloomBlock):

@@ -8,11 +8,11 @@ import torch
 from hivemind import DHT, get_logger
 from torch import nn
 
-from petals.client.config import ClientConfig
-from petals.client.inference_session import InferenceSession
-from petals.client.routing import RemoteSequenceManager
-from petals.client.sequential_autograd import _RemoteSequentialAutogradFunction
-from petals.data_structures import UID_DELIMITER
+from bloombee.client.config import ClientConfig
+from bloombee.client.inference_session import InferenceSession
+from bloombee.client.routing import RemoteSequenceManager
+from bloombee.client.sequential_autograd import _RemoteSequentialAutogradFunction
+from bloombee.data_structures import UID_DELIMITER
 
 logger = get_logger(__name__)
 

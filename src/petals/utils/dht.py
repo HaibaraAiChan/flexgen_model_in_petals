@@ -11,7 +11,7 @@ from hivemind.dht import DHT, DHTNode, DHTValue
 from hivemind.p2p import PeerID
 from hivemind.utils import DHTExpiration, MPFuture, get_dht_time, get_logger
 
-from petals.data_structures import (
+from bloombee.data_structures import (
     CHAIN_DELIMITER,
     UID_DELIMITER,
     ModuleUID,

@@ -22,23 +22,23 @@ from huggingface_hub.utils import EntryNotFoundError
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.utils import get_file_from_repo
 
-from petals.constants import DTYPE_MAP
-from petals.models.mixtral import WrappedMixtralBlock
-from petals.server.block_utils import get_model_block, resolve_block_dtype
-from petals.utils.auto_config import AutoDistributedConfig
-from petals.utils.disk_cache import DEFAULT_CACHE_DIR, allow_cache_reads, allow_cache_writes, free_disk_space_for
-from petals.utils.hf_auth import always_needs_auth
+from bloombee.constants import DTYPE_MAP
+from bloombee.models.mixtral import WrappedMixtralBlock
+from bloombee.server.block_utils import get_model_block, resolve_block_dtype
+from bloombee.utils.auto_config import AutoDistributedConfig
+from bloombee.utils.disk_cache import DEFAULT_CACHE_DIR, allow_cache_reads, allow_cache_writes, free_disk_space_for
+from bloombee.utils.hf_auth import always_needs_auth
 
-from petals.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
-from petals.flexgen_utils.compression import CompressionConfig
-from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from bloombee.flexgen_utils.llama_config import LlamaConfig, get_llama_config, download_llama_weights
+from bloombee.flexgen_utils.ExecutionEnv import ExecutionEnv
+from bloombee.flexgen_utils.compression import CompressionConfig
+from bloombee.flexgen_utils.policy import Policy
+from bloombee.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
+from bloombee.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np
 # import pdb
 
-from petals.models.llama.flex_llama import load_weights_from_pytorch_model
+from bloombee.models.llama.flex_llama import load_weights_from_pytorch_model
 
 
 

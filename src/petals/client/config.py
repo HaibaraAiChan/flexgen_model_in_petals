@@ -4,7 +4,7 @@ from typing import Optional, Sequence, Union
 
 from hivemind import PeerID
 
-from petals.constants import PUBLIC_INITIAL_PEERS
+from bloombee.constants import PUBLIC_INITIAL_PEERS
 
 _max_retries = os.getenv("PETALS_MAX_RETRIES")
 DEFAULT_MAX_RETRIES = int(_max_retries) if isinstance(_max_retries, str) else None

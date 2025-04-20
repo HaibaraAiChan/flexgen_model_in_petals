@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple, Union
 from hivemind.utils.logging import get_logger
 from transformers import BloomPreTrainedModel, modeling_utils
 
-from petals.utils.version import get_compatible_model_repo
+from bloombee.utils.version import get_compatible_model_repo
 
 logger = get_logger(__name__)
 

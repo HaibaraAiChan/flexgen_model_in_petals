@@ -7,7 +7,7 @@ import torch.nn as nn
 from hivemind import get_logger
 from transformers import PretrainedConfig
 
-from petals.utils.misc import DUMMY
+from bloombee.utils.misc import DUMMY
 
 logger = get_logger(__name__)
 
